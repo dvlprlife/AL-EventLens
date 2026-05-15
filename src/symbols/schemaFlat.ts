@@ -110,7 +110,7 @@ function eventKindFor(method: unknown): EventKind | undefined {
   return undefined;
 }
 
-function coerceToObject(json: unknown, label: string): unknown {
+export function coerceToObject(json: unknown, label: string): unknown {
   if (typeof json === 'string') {
     const body = json.charCodeAt(0) === 0xFEFF ? json.slice(1) : json;
     try {
@@ -129,6 +129,6 @@ function coerceToObject(json: unknown, label: string): unknown {
   return json;
 }
 
-function isPlainObject(value: unknown): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
