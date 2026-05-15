@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Changed
+
+- Dual-platform bundle: `package.json` now declares both `main` (Node bundle at `dist/extension.js`) and `browser` (Web Worker bundle at `dist/web/extension.js`). VS Code Desktop loads the Node bundle; `vscode.dev` and `github.dev` continue to load the browser bundle. Source-level web-discipline is preserved — the browser bundle is built from the same source and would fail to build if anything used Node-only APIs.
+
 ## [0.1.0] - 2026-05-14
 
 Initial public release.
