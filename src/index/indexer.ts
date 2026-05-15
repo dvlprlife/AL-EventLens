@@ -3,6 +3,7 @@ import { parseAl, stripComments } from '../al/parser';
 import { synthesizeTriggerPublishers } from '../al/triggers';
 import { readApp } from '../symbols/appReader';
 import { parseSymbolReference } from '../symbols/detect';
+import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
 import { resolveSubscribers } from './resolver';
 import type { ObjectRef, Publisher, Subscriber } from '../al/types';
 
@@ -26,9 +27,6 @@ export interface EventIndex {
  * the whole index.
  */
 export async function buildIndex(context: vscode.ExtensionContext): Promise<EventIndex> {
-  // `context` is reserved for the cache integration (#follow-up); accepting
-  // it here keeps the call site stable while that lands.
-  void context;
   const cfg = vscode.workspace.getConfiguration('alEventLens');
   const scanAlpackages = cfg.get<boolean>('scanAlpackages', true);
   const includeTriggerEvents = cfg.get<boolean>('includeTriggerEvents', true);
@@ -61,9 +59,18 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
     const appUris = await vscode.workspace.findFiles('**/.alpackages/*.app');
     for (const uri of appUris) {
       try {
+        const stat = await vscode.workspace.fs.stat(uri);
         const app = await readApp(uri);
-        publishers.push(...parseSymbolReference(app.symbolReferenceJson, app.appId));
-
+        const key: CacheKey = { appId: app.appId, version: app.version, mtime: stat.mtime };
+        let appPublishers = await loadCachedSymbols(context, key);
+        if (!appPublishers) {
+          appPublishers = parseSymbolReference(app.symbolReferenceJson, app.appId);
+          await storeCachedSymbols(context, key, appPublishers);
+        }
+        publishers.push(...appPublishers);
+        // Subscribers from bundled sources are NOT cached; bundled-source
+        // subscribers must be re-parsed every run since they carry
+        // `vscode.Location` references that aren't JSON-safe.
         for (const src of app.bundledAlSources) {
           const srcUri = vscode.Uri.parse(`al-eventlens-app:/${app.appId}/${src.path}`);
           const parsed = parseAl(srcUri, src.text);

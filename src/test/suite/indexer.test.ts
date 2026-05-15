@@ -1,7 +1,10 @@
 import * as assert from 'assert';
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
 import JSZip from 'jszip';
 import { buildIndex } from '../../index/indexer';
+import { storeCachedSymbols, type CacheKey } from '../../index/cache';
 
 // ─── Test fixtures ───────────────────────────────────────────────────────
 
@@ -81,6 +84,8 @@ interface Patches {
   alFiles?: vscode.Uri[];
   appFiles?: vscode.Uri[];
   fs: FakeFs;
+  /** Mtime returned by `stat` for any registered file (defaults to 1000). */
+  mtime?: number;
 }
 
 let originalFindFiles: typeof vscode.workspace.findFiles;
@@ -115,18 +120,42 @@ function applyPatches(p: Patches): void {
 
   // fs: replace the whole object. The real one's properties are read-only,
   // but `vscode.workspace.fs` itself is a writable getter we can override.
+  // Reads of registered URIs come from the in-memory bytes map; everything
+  // else (directory ops on the cache's globalStorageUri, etc.) delegates to
+  // the real fs so the cache integration can write its tmp files normally.
+  const captured = originalFs;
+  const mtime = p.mtime ?? 1000;
   const fakeFs = {
     readFile: async (uri: vscode.Uri): Promise<Uint8Array> => {
-      if (uri.path.toLowerCase().endsWith('.app')) {
-        appReadCount++;
-      }
       const key = uri.toString();
       const bytes = p.fs.bytes.get(key);
-      if (!bytes) {
-        throw new Error(`fake fs: no bytes registered for ${key}`);
+      if (bytes) {
+        if (uri.path.toLowerCase().endsWith('.app')) {
+          appReadCount++;
+        }
+        return bytes;
       }
-      return bytes;
-    }
+      return captured.readFile(uri);
+    },
+    stat: async (uri: vscode.Uri): Promise<vscode.FileStat> => {
+      const key = uri.toString();
+      if (p.fs.bytes.has(key)) {
+        return {
+          type: vscode.FileType.File,
+          ctime: mtime,
+          mtime,
+          size: p.fs.bytes.get(key)!.length
+        };
+      }
+      return captured.stat(uri);
+    },
+    createDirectory: (uri: vscode.Uri): Thenable<void> => captured.createDirectory(uri),
+    readDirectory: (uri: vscode.Uri): Thenable<[string, vscode.FileType][]> =>
+      captured.readDirectory(uri),
+    writeFile: (uri: vscode.Uri, content: Uint8Array): Thenable<void> =>
+      captured.writeFile(uri, content),
+    delete: (uri: vscode.Uri, options?: { recursive?: boolean; useTrash?: boolean }): Thenable<void> =>
+      captured.delete(uri, options)
   } as unknown as typeof vscode.workspace.fs;
   Object.defineProperty(vscode.workspace, 'fs', {
     configurable: true,
@@ -174,14 +203,31 @@ function restorePatches(): void {
   Object.defineProperty(console, 'warn', { configurable: true, writable: true, value: originalConsoleWarn });
 }
 
+// Tracks tmp dirs created by `fakeContext` so teardown can clean them up.
+const tmpStorageDirs: vscode.Uri[] = [];
+
 function fakeContext(): vscode.ExtensionContext {
-  // buildIndex only reads context.extensionUri in its (former) error
-  // message; the new implementation doesn't use the parameter at all.
-  // A minimal stub is sufficient.
+  // The cache wiring uses `context.globalStorageUri` as a real, writable
+  // location. Each fakeContext gets its own tmp dir so tests don't share
+  // cache state.
+  const unique = `al-eventlens-indexer-test-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const globalStorageUri = vscode.Uri.file(path.join(os.tmpdir(), unique));
+  tmpStorageDirs.push(globalStorageUri);
   return {
     extensionUri: vscode.Uri.parse('file:///fake/extension'),
+    globalStorageUri,
     subscriptions: []
   } as unknown as vscode.ExtensionContext;
+}
+
+async function cleanupTmpStorage(): Promise<void> {
+  for (const dir of tmpStorageDirs.splice(0)) {
+    try {
+      await vscode.workspace.fs.delete(dir, { recursive: true, useTrash: false });
+    } catch {
+      // already gone or inaccessible
+    }
+  }
 }
 
 function encode(text: string): Uint8Array {
@@ -191,7 +237,10 @@ function encode(text: string): Uint8Array {
 // ─── Test suite ──────────────────────────────────────────────────────────
 
 suite('index/indexer: buildIndex', () => {
-  teardown(() => restorePatches());
+  teardown(async () => {
+    restorePatches();
+    await cleanupTmpStorage();
+  });
 
   test('workspace-only path: parses Codeunit + Table, synthesizes 10 trigger publishers, resolves the local subscriber', async () => {
     const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
@@ -428,5 +477,59 @@ suite('index/indexer: buildIndex', () => {
     assert.strictEqual(idx.publishers[0].kind, 'integration');
     assert.strictEqual(idx.publishers[0].eventName, 'OnAfterFoo');
     assert.ok(!idx.publishers.some((p) => p.kind === 'trigger'));
+  });
+
+  test('cache hit short-circuits parseSymbolReference for the .app pass', async () => {
+    // Strategy: pre-populate the cache for the same (appId, version, mtime)
+    // triple buildIndex will compute, with a marker publisher distinct from
+    // anything `parseSymbolReference` could ever produce for the fixture's
+    // SymbolReference.json. If the marker shows up in the result, the
+    // indexer reused the cache; if `OnAppEvent` shows up, it re-parsed.
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes();
+    const fs: FakeFs = {
+      bytes: new Map([[appUri.toString(), appBytes]])
+    };
+    const ctx = fakeContext();
+    const FIXED_MTIME = 4242;
+    const APP_ID = '11111111-1111-1111-1111-111111111111'; // matches SAMPLE_APP_MANIFEST
+    const APP_VERSION = '1.0.0.0';
+
+    // Seed the cache directly (don't go through the indexer). The cache
+    // setting is enabled by default; storeCachedSymbols will write to
+    // `ctx.globalStorageUri/symbols/...`.
+    const key: CacheKey = { appId: APP_ID, version: APP_VERSION, mtime: FIXED_MTIME };
+    await storeCachedSymbols(ctx, key, [
+      {
+        owner: { kind: 'codeunit', name: 'CACHED_MARKER', appId: APP_ID },
+        eventName: 'OnCachedMarker',
+        kind: 'integration'
+      }
+    ]);
+
+    applyPatches({
+      alFiles: [],
+      appFiles: [appUri],
+      fs,
+      mtime: FIXED_MTIME,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(ctx);
+
+    // The cache-marker publisher is impossible for parseSymbolReference
+    // to have produced for this fixture, so its presence is sufficient
+    // evidence the indexer reused the cache rather than re-parsing. The
+    // absence of the parser's expected output (OnAppEvent) is the
+    // companion signal — if the parser had run, OnAppEvent would appear
+    // alongside (or instead of) the marker.
+    const appPubs = idx.publishers.filter((p) => p.owner.appId === APP_ID);
+    assert.strictEqual(appPubs.length, 1, `expected exactly one .app publisher (the marker), got: ${JSON.stringify(appPubs)}`);
+    assert.strictEqual(appPubs[0].owner.name, 'CACHED_MARKER');
+    assert.strictEqual(appPubs[0].eventName, 'OnCachedMarker');
+    assert.ok(
+      !idx.publishers.some((p) => p.eventName === 'OnAppEvent'),
+      'parser must NOT have run — OnAppEvent (the parser output) should be absent'
+    );
   });
 });
