@@ -188,8 +188,12 @@ function stripQuotes(s: string): string {
 /**
  * Replace comment content with spaces (preserving newlines and string offsets),
  * so downstream regex matches don't fire on text inside line or block comments.
+ *
+ * Exported so callers that run their own regex sweeps over AL source (e.g. the
+ * indexer's trigger-owner collection) match `parseAl`'s view of the file —
+ * commented-out object headers must not be treated as real declarations.
  */
-function stripComments(text: string): string {
+export function stripComments(text: string): string {
   let out = text.replace(/\/\*[\s\S]*?\*\//g, (m) =>
     m.replace(/[^\n]/g, ' ')
   );
