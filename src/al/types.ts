@@ -38,6 +38,15 @@ export interface Publisher {
   readonly kind: EventKind;
   /** Source location of the procedure declaration, or undefined for synthesized triggers. */
   readonly location?: vscode.Location;
+  /**
+   * URI of the source file this publisher is attributed to, when known.
+   * Real publishers carry their position in `location`; this field exists
+   * so the save watcher can tag synthesized **trigger** publishers (which
+   * have no `location`) with the file that contributed them, letting the
+   * `EventIndexStore` replace them on a subsequent save instead of
+   * accumulating duplicates.
+   */
+  readonly sourceUri?: vscode.Uri;
 }
 
 /** A discovered event subscriber. */

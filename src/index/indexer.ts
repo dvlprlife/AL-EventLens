@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
-import { parseAl, stripComments } from '../al/parser';
-import { synthesizeTriggerPublishers } from '../al/triggers';
+import { parseAl } from '../al/parser';
+import { collectTriggerOwners, synthesizeTriggerPublishers } from '../al/triggers';
 import { readApp } from '../symbols/appReader';
 import { parseSymbolReference } from '../symbols/detect';
 import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
@@ -95,41 +95,4 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
 
   const resolved = resolveSubscribers(publishers, subscribers);
   return { publishers, subscribers: resolved };
-}
-
-// Object-header pattern aligned with src/al/parser.ts but limited to Table
-// and Page (and their *extension* siblings, which we deliberately ignore —
-// extensions don't define their own trigger events). Kept inline rather
-// than re-exported from parser.ts so the indexer can dedupe owners across
-// many files in one pass without re-running the full publisher/subscriber
-// regex sweep. Operates on comment-stripped text (via parser's
-// `stripComments`) so commented-out headers don't synthesize phantom
-// trigger publishers.
-const tablePageHeaderRe =
-  /^\s*(table|page)\b\s+(?:(\d+)\s+)?(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/gim;
-
-function collectTriggerOwners(
-  text: string,
-  out: Map<string, ObjectRef>,
-  appId?: string
-): void {
-  const cleaned = stripComments(text);
-  // Reset lastIndex because the regex carries state across calls.
-  tablePageHeaderRe.lastIndex = 0;
-  for (const m of cleaned.matchAll(tablePageHeaderRe)) {
-    const kind = m[1].toLowerCase() === 'table' ? 'table' : 'page';
-    const id = m[2] ? parseInt(m[2], 10) : undefined;
-    const name = m[3] ?? m[4] ?? '';
-    if (!name) {
-      continue;
-    }
-    // Global key: appId-scoped so identically-named objects in different
-    // packages aren't collapsed, but case-insensitive on name to match
-    // the resolver's matching semantics.
-    const key = `${appId ?? '__workspace__'}|${kind}|${name.toLowerCase()}`;
-    if (out.has(key)) {
-      continue;
-    }
-    out.set(key, { kind, id, name, appId });
-  }
 }

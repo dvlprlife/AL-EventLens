@@ -1,3 +1,4 @@
+import { stripComments } from './parser';
 import type { ObjectRef, Publisher } from './types';
 
 const TABLE_TRIGGER_EVENTS: ReadonlyArray<string> = [
@@ -52,5 +53,49 @@ function triggerEventsFor(kind: ObjectRef['kind']): ReadonlyArray<string> {
       return PAGE_TRIGGER_EVENTS;
     default:
       return [];
+  }
+}
+
+// Object-header pattern aligned with src/al/parser.ts but limited to Table
+// and Page (and their *extension* siblings, which we deliberately ignore —
+// extensions don't define their own trigger events). Kept here rather than
+// re-exported from parser.ts so callers can dedupe owners across many files
+// in one pass without re-running the full publisher/subscriber regex sweep.
+// Operates on comment-stripped text so commented-out headers don't
+// synthesize phantom trigger publishers.
+const tablePageHeaderRe =
+  /^\s*(table|page)\b\s+(?:(\d+)\s+)?(?:"([^"]+)"|([A-Za-z_][A-Za-z0-9_]*))/gim;
+
+/**
+ * Walk a single AL source file's text and emit one `ObjectRef` per Table or
+ * Page header into the supplied dedup map. The map's keys are scoped by
+ * `appId` so identically-named objects in different packages aren't
+ * collapsed, and case-insensitive on name to match the resolver. Pass the
+ * same map across many files in a pass to dedupe globally; pass a fresh
+ * empty map per file for incremental save handling.
+ *
+ * Used by the workspace indexer (full pass) and the save watcher
+ * (incremental pass) to feed `synthesizeTriggerPublishers`.
+ */
+export function collectTriggerOwners(
+  text: string,
+  out: Map<string, ObjectRef>,
+  appId?: string
+): void {
+  const cleaned = stripComments(text);
+  // Reset lastIndex because the regex carries state across calls.
+  tablePageHeaderRe.lastIndex = 0;
+  for (const m of cleaned.matchAll(tablePageHeaderRe)) {
+    const kind = m[1].toLowerCase() === 'table' ? 'table' : 'page';
+    const id = m[2] ? parseInt(m[2], 10) : undefined;
+    const name = m[3] ?? m[4] ?? '';
+    if (!name) {
+      continue;
+    }
+    const key = `${appId ?? '__workspace__'}|${kind}|${name.toLowerCase()}`;
+    if (out.has(key)) {
+      continue;
+    }
+    out.set(key, { kind, id, name, appId });
   }
 }
