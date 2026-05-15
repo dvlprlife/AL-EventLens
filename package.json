@@ -64,7 +64,7 @@
         "alEventLens.cache.enabled": {
           "type": "boolean",
           "default": true,
-          "description": "Cache parsed .app symbol results in extension global storage, keyed by (appId, version, mtime). Disable to force a full re-parse every session."
+          "description": "Cache parsed .app symbol results in extension global storage, keyed by (appId, version, mtime). Disable to force a full re-parse on session start."
         },
         "alEventLens.indexOnSave": {
           "type": "boolean",

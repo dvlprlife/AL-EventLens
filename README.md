@@ -2,7 +2,7 @@
 
 See event publishers and subscribers across your AL workspace, and the lines that connect them.
 
-AL EventLens indexes every `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscriber]` in your AL workspace and its `.alpackages` dependencies, then surfaces the resolved publisher → subscriber graph in a searchable panel, an activity-bar view, and inline CodeLens hints. No more grepping across apps to figure out who is listening to which event.
+AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscriber]` declarations in your AL workspace and its `.alpackages` dependencies, then surfaces the resolved publisher → subscriber graph in a searchable panel, an activity-bar view, and inline CodeLens hints. No more grepping across apps to figure out who is listening to which event.
 
 ## Demo
 
@@ -10,7 +10,7 @@ _Demo GIFs and screenshots will be added once the first UI surface ships._
 
 ## Features
 
-- **Workspace-wide event index** — Parses every `.al` file in the workspace and every `.app` in `.alpackages` to build a single index of publishers and subscribers. Pre-BC22 (`'Codeunit Name'`, `'OnEvent'`) and BC22+ (`Codeunit::"Name"`, `OnEvent`) subscriber syntaxes are both recognized.
+- **Workspace-wide event index** — Parses `.al` files in the workspace and `.app` packages in `.alpackages` to build a single index of publishers and subscribers. Pre-BC22 (`'Codeunit Name'`, `'OnEvent'`) and BC22+ (`Codeunit::"Name"`, `OnEvent`) subscriber syntaxes are both recognized.
 - **Resolved subscriber → publisher links** — Each subscriber is matched against its target publisher and marked **resolved** or **unresolved**. Unresolved subscribers usually mean the target app is missing from `.alpackages`; resolved ones are click-jumpable.
 - **Trigger events as first-class publishers** — Implicit table and page trigger events (`OnAfterDeleteEvent`, `OnBeforeValidateEvent`, …) are synthesized as virtual publishers so subscribers to them resolve cleanly.
 - **Searchable webview panel** — Publisher list with subscriber-count badges; click a publisher to see all subscribers in a detail pane; click a subscriber to jump to its source.

@@ -136,7 +136,7 @@ These are the architectural ground rules the PR Reviewer should treat as load-be
 
 - **AL source files (`.al`) are the source of truth for events.** `SymbolReference.json` inside compiled `.app` packages does **not** preserve `[EventSubscriber]` attributes — they are stripped at compile time. Publishers *are* preserved in `SymbolReference.json` and may be read from there, but workspace parsing always uses `.al` for consistency.
 - **Two subscriber syntaxes** must be recognized: pre-BC22 (`'Codeunit Name'`, `'OnEvent'` — string literals, quoted event name) and BC22+ (`Codeunit::"Name"`, `OnEvent` — bare event identifier). The regex covers both.
-- **Trigger events are implicit.** Every Table and Page object gets a synthesized virtual publisher per trigger event (`OnAfterDeleteEvent`, `OnBeforeValidateEvent`, etc.) during indexing, gated by `alEventLens.includeTriggerEvents`.
+- **Trigger events are implicit.** Table and Page objects get synthesized virtual publishers per trigger event (`OnAfterDeleteEvent`, `OnBeforeValidateEvent`, etc.) during indexing, gated by `alEventLens.includeTriggerEvents`.
 
 ### `.app` package format
 
