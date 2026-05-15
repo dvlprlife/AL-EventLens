@@ -21,7 +21,7 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(store);
 
   context.subscriptions.push(registerTreeView(context, store));
-  context.subscriptions.push(registerCodeLens(context));
+  context.subscriptions.push(registerCodeLens(context, store));
   context.subscriptions.push(registerSaveWatcher(context, store));
 
   // Fire-and-forget initial index. The result populates the store so
