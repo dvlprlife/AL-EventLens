@@ -20,7 +20,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const store = new EventIndexStore();
   context.subscriptions.push(store);
 
-  context.subscriptions.push(registerTreeView(context));
+  context.subscriptions.push(registerTreeView(context, store));
   context.subscriptions.push(registerCodeLens(context));
   context.subscriptions.push(registerSaveWatcher(context, store));
 
