@@ -1,0 +1,120 @@
+{
+  "name": "al-eventlens",
+  "displayName": "AL EventLens",
+  "description": "See event publishers and subscribers across your AL workspace, and the lines that connect them.",
+  "version": "0.1.0",
+  "publisher": "dvlprlife",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Visualization",
+    "Other"
+  ],
+  "keywords": [
+    "al",
+    "business-central",
+    "navision",
+    "dynamics-365",
+    "events",
+    "publisher",
+    "subscriber",
+    "graph"
+  ],
+  "icon": "images/icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dvlprlife/AL-EventLens"
+  },
+  "activationEvents": [
+    "onLanguage:al",
+    "onView:alEventLensView"
+  ],
+  "browser": "./dist/web/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "alEventLens",
+          "title": "AL EventLens",
+          "icon": "images/icon.png"
+        }
+      ]
+    },
+    "views": {
+      "alEventLens": [
+        {
+          "id": "alEventLensView",
+          "name": "Publishers"
+        }
+      ]
+    },
+    "commands": [
+      { "command": "alEventLens.openPanel",         "title": "Open Panel",                "category": "AL EventLens" },
+      { "command": "alEventLens.refresh",           "title": "Refresh Index",             "category": "AL EventLens" },
+      { "command": "alEventLens.revealPublisher",   "title": "Reveal Publisher",          "category": "AL EventLens" },
+      { "command": "alEventLens.gotoSubscriber",    "title": "Go to Subscriber",          "category": "AL EventLens" },
+      { "command": "alEventLens.exportMermaid",     "title": "Export to Mermaid",         "category": "AL EventLens" }
+    ],
+    "configuration": {
+      "title": "AL EventLens",
+      "properties": {
+        "alEventLens.cache.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Cache parsed .app symbol results in extension global storage, keyed by (appId, version, mtime). Disable to force a full re-parse every session."
+        },
+        "alEventLens.indexOnSave": {
+          "type": "boolean",
+          "default": true,
+          "description": "Incrementally re-index AL files when they are saved."
+        },
+        "alEventLens.scanAlpackages": {
+          "type": "boolean",
+          "default": true,
+          "description": "Scan .alpackages/*.app files in the workspace for publishers (and bundled subscribers, where present) in addition to workspace AL source."
+        },
+        "alEventLens.includeTriggerEvents": {
+          "type": "boolean",
+          "default": true,
+          "description": "Synthesize virtual publishers for each Table and Page object covering implicit trigger events (OnAfterDeleteEvent, OnBeforeValidateEvent, etc.)."
+        },
+        "alEventLens.codeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a CodeLens above [IntegrationEvent] and [BusinessEvent] declarations with the live subscriber count."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run package",
+    "compile": "npm run check-types && tsc --outDir dist && node esbuild.js",
+    "watch": "npm-run-all -p watch:*",
+    "watch:esbuild": "node esbuild.js --watch",
+    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
+    "package": "npm run clean && npm run check-types && node esbuild.js --production",
+    "clean": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\"",
+    "check-types": "tsc --noEmit",
+    "lint": "eslint src --ext ts",
+    "test": "vscode-test",
+    "pretest": "npm run compile && npm run lint"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.6",
+    "@types/node": "20.x",
+    "@types/vscode": "^1.85.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "@vscode/test-cli": "^0.0.9",
+    "@vscode/test-electron": "^2.3.9",
+    "esbuild": "^0.20.0",
+    "eslint": "^8.56.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.3.0"
+  }
+}
