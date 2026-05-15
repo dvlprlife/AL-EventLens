@@ -8,6 +8,7 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 - AL source parser (`src/al/parser.ts`) recognizes publisher (`[IntegrationEvent]`, `[BusinessEvent]`) and subscriber (`[EventSubscriber]`, both pre-BC22 and BC22+ syntaxes) declarations across all AL object kinds, returning typed `Publisher` and `Subscriber` records with `vscode.Location` pointing at the procedure name.
 - Trigger-event synthesis (`src/al/triggers.ts`) produces 10 virtual publishers per Table object (`OnBeforeInsertEvent`, `OnAfterInsertEvent`, `OnBeforeModifyEvent`, `OnAfterModifyEvent`, `OnBeforeDeleteEvent`, `OnAfterDeleteEvent`, `OnBeforeRenameEvent`, `OnAfterRenameEvent`, `OnBeforeValidateEvent`, `OnAfterValidateEvent`) and 8 per Page object (`OnOpenPageEvent`, `OnClosePageEvent`, `OnQueryClosePageEvent`, `OnInsertRecordEvent`, `OnModifyRecordEvent`, `OnDeleteRecordEvent`, `OnNewRecordEvent`, `OnAfterGetCurrRecordEvent`). The indexer will gate this on the `alEventLens.includeTriggerEvents` setting.
+- `.app` package reader (`src/symbols/appReader.ts`) reads BC application packages via `vscode.workspace.fs` (web-compatible), validates the 40-byte NAVX header, decompresses the embedded PKZIP with JSZip, and extracts the `appId`, `version`, `SymbolReference.json` body, and bundled AL source files under `src/**`. `.NEA` runtime packages are detected by extension and rejected with a clear error rather than a silent failure.
 
 ### Changed
 

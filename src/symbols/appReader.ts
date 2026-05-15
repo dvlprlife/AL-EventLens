@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import JSZip from 'jszip';
 
 /** Raw bytes of a `SymbolReference.json` extracted from a `.app` package. */
 export interface AppContents {
@@ -8,6 +9,9 @@ export interface AppContents {
   /** Bundled AL source files when the package included them under `src/**`. */
   readonly bundledAlSources: ReadonlyArray<{ path: string; text: string }>;
 }
+
+const NAVX_HEADER_SIZE = 40;
+const NAVX_MAGIC = [0x4E, 0x41, 0x56, 0x58]; // "NAVX"
 
 /**
  * Read a Business Central `.app` package via `vscode.workspace.fs` and
@@ -23,5 +27,92 @@ export interface AppContents {
  * silent failure.
  */
 export async function readApp(uri: vscode.Uri): Promise<AppContents> {
-  throw new Error(`readApp(${uri.toString()}): not yet implemented`);
+  if (uri.path.toLowerCase().endsWith('.nea')) {
+    throw new Error(
+      `readApp: .NEA runtime packages are encrypted and unsupported (uri=${uri.toString()})`
+    );
+  }
+  const bytes = await vscode.workspace.fs.readFile(uri);
+  return parseAppBytes(bytes, uri.toString());
+}
+
+/**
+ * Parse already-loaded `.app` bytes. Exported for testability so unit
+ * tests can construct fake packages in memory via JSZip without touching
+ * the filesystem.
+ */
+export async function parseAppBytes(
+  bytes: Uint8Array,
+  sourceLabel: string
+): Promise<AppContents> {
+  if (bytes.length < NAVX_HEADER_SIZE) {
+    throw new Error(
+      `readApp: file too small to be a .app package (source=${sourceLabel}, ${bytes.length} bytes)`
+    );
+  }
+  for (let i = 0; i < NAVX_MAGIC.length; i++) {
+    if (bytes[i] !== NAVX_MAGIC[i]) {
+      throw new Error(
+        `readApp: not a NAVX-formatted .app package; check whether the file is a .NEA runtime package or corrupt (source=${sourceLabel})`
+      );
+    }
+  }
+
+  const zipBytes = bytes.slice(NAVX_HEADER_SIZE);
+  const zip = await JSZip.loadAsync(zipBytes);
+
+  const manifestEntry = zip.file('NavxManifest.xml');
+  if (!manifestEntry) {
+    throw new Error(
+      `readApp: NavxManifest.xml not found inside .app package (source=${sourceLabel})`
+    );
+  }
+  const manifestXml = await manifestEntry.async('string');
+  const { appId, version } = parseManifest(manifestXml, sourceLabel);
+
+  const symbolEntry = zip.file('SymbolReference.json');
+  if (!symbolEntry) {
+    throw new Error(
+      `readApp: SymbolReference.json not found inside .app package (source=${sourceLabel})`
+    );
+  }
+  const symbolReferenceJson = await symbolEntry.async('string');
+
+  const bundledAlSources: { path: string; text: string }[] = [];
+  for (const [path, entry] of Object.entries(zip.files)) {
+    if (entry.dir) {
+      continue;
+    }
+    if (!isBundledAlSource(path)) {
+      continue;
+    }
+    bundledAlSources.push({ path, text: await entry.async('string') });
+  }
+
+  return { appId, version, symbolReferenceJson, bundledAlSources };
+}
+
+function isBundledAlSource(path: string): boolean {
+  const lower = path.toLowerCase();
+  return lower.startsWith('src/') && lower.endsWith('.al');
+}
+
+function parseManifest(
+  xml: string,
+  sourceLabel: string
+): { appId: string; version: string } {
+  const appElement = /<App\b[^>]*>/i.exec(xml);
+  if (!appElement) {
+    throw new Error(
+      `readApp: <App> element not found in NavxManifest.xml (source=${sourceLabel})`
+    );
+  }
+  const idMatch = /\bId\s*=\s*"([^"]+)"/i.exec(appElement[0]);
+  const versionMatch = /\bVersion\s*=\s*"([^"]+)"/i.exec(appElement[0]);
+  if (!idMatch || !versionMatch) {
+    throw new Error(
+      `readApp: NavxManifest.xml <App> element missing Id or Version attribute (source=${sourceLabel})`
+    );
+  }
+  return { appId: idMatch[1], version: versionMatch[1] };
 }
