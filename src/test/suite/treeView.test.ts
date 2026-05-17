@@ -412,6 +412,63 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     }
   });
 
+  test('TreeItems carry vscode.ThemeIcon iconPaths appropriate to their node kind', () => {
+    const store = new EventIndexStore();
+    try {
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'Sales-Post', 'OnAfter'),
+          makePublisher('table',    'Customer',   'OnInsert'),
+          makePublisher('query',    'TopCustomers', 'OnAfterRun')
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      const provider = new EventTreeDataProvider(store);
+
+      const [appNode] = provider.getChildren() as TreeNode[];
+      const appIcon = provider.getTreeItem(appNode).iconPath;
+      assert.ok(appIcon instanceof vscode.ThemeIcon, 'AppNode iconPath must be a ThemeIcon');
+      assert.strictEqual((appIcon as vscode.ThemeIcon).id, 'package');
+
+      const kindNodes = provider.getChildren(appNode) as TreeNode[];
+      const iconById = new Map<string, string>();
+      for (const kn of kindNodes) {
+        const item = provider.getTreeItem(kn);
+        iconById.set(item.label as string, (item.iconPath as vscode.ThemeIcon).id);
+      }
+      assert.strictEqual(iconById.get('Codeunit'), 'symbol-class');
+      assert.strictEqual(iconById.get('Table'),    'symbol-struct');
+      assert.strictEqual(iconById.get('Query'),    'search');
+
+      const codeunitKind = kindNodes.find((n) => provider.getTreeItem(n).label === 'Codeunit')!;
+      const [objectNode] = provider.getChildren(codeunitKind) as TreeNode[];
+      const objIcon = provider.getTreeItem(objectNode).iconPath;
+      assert.strictEqual((objIcon as vscode.ThemeIcon).id, 'symbol-file');
+
+      const [eventNode] = provider.getChildren(objectNode) as TreeNode[];
+      const eventIcon = provider.getTreeItem(eventNode).iconPath;
+      assert.strictEqual((eventIcon as vscode.ThemeIcon).id, 'symbol-event');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('EmptyNode TreeItem carries an info ThemeIcon', () => {
+    const store = new EventIndexStore();
+    try {
+      const provider = new EventTreeDataProvider(store);
+      const [emptyNode] = provider.getChildren() as TreeNode[];
+      assert.strictEqual(emptyNode.kind, 'empty');
+      const icon = provider.getTreeItem(emptyNode).iconPath;
+      assert.ok(icon instanceof vscode.ThemeIcon);
+      assert.strictEqual((icon as vscode.ThemeIcon).id, 'info');
+    } finally {
+      store.dispose();
+    }
+  });
+
   test('ObjectNode children are EventNodes sorted by event name; multiple events on the same object live together', () => {
     const store = new EventIndexStore();
     try {

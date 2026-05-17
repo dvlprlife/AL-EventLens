@@ -68,6 +68,26 @@ function formatKind(kind: ObjectKind): string {
   }
 }
 
+/** Codicon id for a given AL object kind. Drawn from the standard
+ *  vscode.ThemeIcon set so it themes automatically — no extra assets. */
+function iconIdForKind(kind: ObjectKind): string {
+  switch (kind) {
+    case 'codeunit':         return 'symbol-class';
+    case 'table':            return 'symbol-struct';
+    case 'tableextension':   return 'symbol-struct';
+    case 'page':             return 'window';
+    case 'pageextension':    return 'window';
+    case 'report':           return 'notebook';
+    case 'reportextension':  return 'notebook';
+    case 'query':            return 'search';
+    case 'xmlport':          return 'file-code';
+    case 'enum':             return 'symbol-enum';
+    case 'enumextension':    return 'symbol-enum';
+    case 'permissionset':    return 'lock';
+    case 'interface':        return 'symbol-interface';
+  }
+}
+
 /** Group publishers by `owner.appId`; `undefined` → `(workspace)` bucket.
  *  Resolves friendly names from `appMeta` when available. */
 function groupByApp(
@@ -169,10 +189,12 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
 
   public getTreeItem(node: TreeNode): vscode.TreeItem {
     if (node.kind === 'empty') {
-      return new vscode.TreeItem(
+      const item = new vscode.TreeItem(
         'No publishers indexed yet — try `AL EventLens: Refresh Index`',
         vscode.TreeItemCollapsibleState.None
       );
+      item.iconPath = new vscode.ThemeIcon('info');
+      return item;
     }
     if (node.kind === 'app') {
       const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Collapsed);
@@ -186,16 +208,19 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
         tooltipLines.push(`appId: ${node.appId}`);
         item.tooltip = tooltipLines.join('\n');
       }
+      item.iconPath = new vscode.ThemeIcon('package');
       return item;
     }
     if (node.kind === 'kind') {
       const item = new vscode.TreeItem(formatKind(node.objectKind), vscode.TreeItemCollapsibleState.Collapsed);
       item.description = String(node.publishers.length);
+      item.iconPath = new vscode.ThemeIcon(iconIdForKind(node.objectKind));
       return item;
     }
     if (node.kind === 'object') {
       const item = new vscode.TreeItem(node.objectName, vscode.TreeItemCollapsibleState.Collapsed);
       item.description = String(node.publishers.length);
+      item.iconPath = new vscode.ThemeIcon('symbol-file');
       return item;
     }
     // event leaf
@@ -206,6 +231,7 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
       title: 'Reveal Publisher',
       arguments: [node.publisher]
     };
+    item.iconPath = new vscode.ThemeIcon('symbol-event');
     return item;
   }
 
