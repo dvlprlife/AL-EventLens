@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import type { ObjectKind, Publisher, Subscriber } from '../al/types';
+import type { ObjectKind, Publisher } from '../al/types';
+import { countSubscribersByPublisherKey, publisherKey } from '../index/match';
 import { EventIndexStore } from '../index/store';
 
 // ─── Tree node model ────────────────────────────────────────────────────
@@ -30,11 +31,6 @@ export type TreeNode = AppNode | PublisherNode | EmptyNode;
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const WORKSPACE_BUCKET = '(workspace)';
-
-/** Mirror of `resolver.ts`'s key — case-insensitive on name and event. */
-function matchKey(kind: ObjectKind, name: string, event: string): string {
-  return `${kind} ${name.toLowerCase()} ${event.toLowerCase()}`;
-}
 
 /** AL kind label-cased for the leaf prefix (`Codeunit`, `TableExtension`, ...). */
 function formatKind(kind: ObjectKind): string {
@@ -147,25 +143,13 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
       return sorted.map<PublisherNode>((p) => ({
         kind: 'publisher',
         publisher: p,
-        subscriberCount: counts.get(matchKey(p.owner.kind, p.owner.name, p.eventName)) ?? 0
+        subscriberCount: counts.get(publisherKey(p)) ?? 0
       }));
     }
 
     // publisher / empty leaves have no children
     return [];
   }
-}
-
-/** Build a `Map<key, count>` keyed identically to `resolver.ts`. */
-function countSubscribersByPublisherKey(
-  subscribers: ReadonlyArray<Subscriber>
-): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const s of subscribers) {
-    const k = matchKey(s.target.kind, s.target.name, s.targetEvent);
-    counts.set(k, (counts.get(k) ?? 0) + 1);
-  }
-  return counts;
 }
 
 /**

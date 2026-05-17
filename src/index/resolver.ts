@@ -1,7 +1,5 @@
-import type { ObjectKind, Publisher, Subscriber } from '../al/types';
-
-const key = (kind: ObjectKind, name: string, event: string): string =>
-  `${kind} ${name.toLowerCase()} ${event.toLowerCase()}`;
+import type { Publisher, Subscriber } from '../al/types';
+import { publisherKey, subscriberKey } from './match';
 
 /**
  * For each subscriber, attempt to match it against a publisher in the
@@ -17,10 +15,10 @@ export function resolveSubscribers(
 ): Subscriber[] {
   const known = new Set<string>();
   for (const p of publishers) {
-    known.add(key(p.owner.kind, p.owner.name, p.eventName));
+    known.add(publisherKey(p));
   }
   return subscribers.map((s) => ({
     ...s,
-    resolved: known.has(key(s.target.kind, s.target.name, s.targetEvent)),
+    resolved: known.has(subscriberKey(s)),
   }));
 }

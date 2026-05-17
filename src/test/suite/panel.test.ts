@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import type { Publisher, Subscriber } from '../../al/types';
 import type { EventIndex } from '../../index/indexer';
 import { EventIndexStore } from '../../index/store';
-import { openPanel, postSelectToPanel } from '../../ui/panel';
+import { getSelectedPublisher, openPanel, postSelectToPanel } from '../../ui/panel';
 import { renderPanelHtml } from '../../ui/panelHtml';
 
 // ─── Fake WebviewPanel ───────────────────────────────────────────────────
@@ -255,6 +255,61 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
       assert.strictEqual(last.type, 'select');
       assert.strictEqual(last.publisher, pub,
         'publisher payload must be the exact object passed in');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('webview "selectionChanged" message updates getSelectedPublisher()', () => {
+    patchCreate();
+    const store = new EventIndexStore();
+    try {
+      openPanel(fakeContext, store);
+      const fake = createCalls[0];
+
+      // Nothing has been selected yet.
+      assert.strictEqual(getSelectedPublisher(), undefined,
+        'getSelectedPublisher() should start undefined on a fresh panel');
+
+      const pub = makePublisher('Sales-Post', 'OnAfterPostSalesDoc');
+      fake.fireReceive({ type: 'selectionChanged', publisher: pub });
+      assert.strictEqual(getSelectedPublisher(), pub,
+        'getSelectedPublisher() should reflect the most recent selectionChanged payload');
+
+      // Webview can also signal "cleared" with publisher: null.
+      fake.fireReceive({ type: 'selectionChanged', publisher: null });
+      assert.strictEqual(getSelectedPublisher(), undefined,
+        'getSelectedPublisher() should clear when publisher is null');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('postSelectToPanel also updates getSelectedPublisher() synchronously', () => {
+    patchCreate();
+    const store = new EventIndexStore();
+    try {
+      openPanel(fakeContext, store);
+      const pub = makePublisher('Reveal Target', 'OnSomething');
+      postSelectToPanel(pub);
+      assert.strictEqual(getSelectedPublisher(), pub,
+        'getSelectedPublisher() should reflect the just-posted selection without a webview round-trip');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('panel dispose clears getSelectedPublisher()', () => {
+    patchCreate();
+    const store = new EventIndexStore();
+    try {
+      openPanel(fakeContext, store);
+      const fake = createCalls[0];
+      fake.fireReceive({ type: 'selectionChanged', publisher: makePublisher('X', 'Y') });
+      assert.notStrictEqual(getSelectedPublisher(), undefined);
+      fake.fireDispose();
+      assert.strictEqual(getSelectedPublisher(), undefined,
+        'getSelectedPublisher() should return undefined after the panel is disposed');
     } finally {
       store.dispose();
     }

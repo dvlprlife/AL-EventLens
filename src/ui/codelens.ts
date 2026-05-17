@@ -1,28 +1,7 @@
 import * as vscode from 'vscode';
 import { parseAl } from '../al/parser';
-import type { ObjectKind, Subscriber } from '../al/types';
+import { countSubscribersByPublisherKey, publisherKey } from '../index/match';
 import type { EventIndexStore } from '../index/store';
-
-/** Mirror of `resolver.ts`'s key — case-insensitive on name and event.
- *  Kept local to this file (matching the same pattern in `treeView.ts`) so
- *  CodeLens has zero coupling to the freshly-merged tree code. If the
- *  matching logic ever changes, both copies must move together; folding
- *  them into a shared helper in `resolver.ts` is a future cleanup. */
-function matchKey(kind: ObjectKind, name: string, event: string): string {
-  return `${kind} ${name.toLowerCase()} ${event.toLowerCase()}`;
-}
-
-/** Build a `Map<key, count>` keyed identically to `resolver.ts`. */
-function countSubscribersByPublisherKey(
-  subscribers: ReadonlyArray<Subscriber>
-): Map<string, number> {
-  const counts = new Map<string, number>();
-  for (const s of subscribers) {
-    const k = matchKey(s.target.kind, s.target.name, s.targetEvent);
-    counts.set(k, (counts.get(k) ?? 0) + 1);
-  }
-  return counts;
-}
 
 /**
  * `vscode.CodeLensProvider` for the `al` language. For each
@@ -76,7 +55,7 @@ export class AlEventLensCodeLensProvider implements vscode.CodeLensProvider {
       if (!p.location) {
         continue;
       }
-      const count = counts.get(matchKey(p.owner.kind, p.owner.name, p.eventName)) ?? 0;
+      const count = counts.get(publisherKey(p)) ?? 0;
       const title = `${count} ${count === 1 ? 'subscriber' : 'subscribers'}`;
       lenses.push(
         new vscode.CodeLens(p.location.range, {

@@ -5,6 +5,7 @@ import { renderPanelHtml } from './panelHtml';
 
 let activePanel: vscode.WebviewPanel | undefined;
 let storeListener: vscode.Disposable | undefined;
+let selectedPublisher: Publisher | undefined;
 
 const NONCE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
@@ -53,17 +54,24 @@ export function openPanel(context: vscode.ExtensionContext, store: EventIndexSto
   });
 
   panel.webview.onDidReceiveMessage(
-    (msg: { type?: string; subscriber?: { location?: vscode.Location } }) => {
+    (msg: {
+      type?: string;
+      subscriber?: { location?: vscode.Location };
+      publisher?: Publisher | null;
+    }) => {
       if (msg?.type === 'gotoSubscriber' && msg.subscriber?.location) {
         void vscode.commands.executeCommand('alEventLens.gotoSubscriber', msg.subscriber.location);
       } else if (msg?.type === 'refresh') {
         void vscode.commands.executeCommand('alEventLens.refresh');
+      } else if (msg?.type === 'selectionChanged') {
+        selectedPublisher = msg.publisher ?? undefined;
       }
     }
   );
 
   panel.onDidDispose(() => {
     activePanel = undefined;
+    selectedPublisher = undefined;
     storeListener?.dispose();
     storeListener = undefined;
   });
@@ -76,9 +84,24 @@ export function openPanel(context: vscode.ExtensionContext, store: EventIndexSto
  * Post a `{type:'select', publisher}` message to the active panel, if any.
  * Used by `alEventLens.revealPublisher` after `openPanel` returns so the
  * panel highlights the publisher emitted by the tree leaf or CodeLens.
+ *
+ * Also updates the module-level selection cache so a follow-up
+ * `getSelectedPublisher()` (e.g. `exportMermaid` from the command palette)
+ * sees the new selection without waiting for the webview's own
+ * `selectionChanged` round-trip.
  */
 export function postSelectToPanel(publisher: Publisher): void {
   if (activePanel) {
+    selectedPublisher = publisher;
     void activePanel.webview.postMessage({ type: 'select', publisher });
   }
+}
+
+/**
+ * Current panel selection, or `undefined` when the panel is closed or no
+ * publisher has been clicked. The export-Mermaid command falls back to
+ * this when invoked from the command palette without an arg.
+ */
+export function getSelectedPublisher(): Publisher | undefined {
+  return selectedPublisher;
 }

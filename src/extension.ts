@@ -1,7 +1,9 @@
 import * as vscode from 'vscode';
-import { openPanel, postSelectToPanel } from './ui/panel';
+import { getSelectedPublisher, openPanel, postSelectToPanel } from './ui/panel';
 import { registerTreeView } from './ui/treeView';
 import { registerCodeLens } from './ui/codelens';
+import { renderMermaid } from './ui/mermaid';
+import { findSubscribersFor } from './index/match';
 import { registerSaveWatcher } from './index/watcher';
 import { buildIndex } from './index/indexer';
 import { EventIndexStore } from './index/store';
@@ -40,7 +42,22 @@ export function activate(context: vscode.ExtensionContext): void {
     );
     void vscode.window.showTextDocument(uri, { selection: range });
   });
-  register('alEventLens.exportMermaid',   () => { throw new Error('alEventLens.exportMermaid: not yet implemented'); });
+  register('alEventLens.exportMermaid',   (...args) => {
+    const publisher = (args[0] as Publisher | undefined) ?? getSelectedPublisher();
+    if (!publisher) {
+      void vscode.window.showWarningMessage(
+        'AL EventLens: open the panel and select a publisher to export.'
+      );
+      return;
+    }
+    const matches = findSubscribersFor(publisher, store.get().subscribers);
+    const mermaid = renderMermaid(publisher, matches);
+    void vscode.env.clipboard.writeText(mermaid).then(() => {
+      void vscode.window.showInformationMessage(
+        `AL EventLens: copied ${matches.length} subscriber${matches.length === 1 ? '' : 's'} to clipboard as Mermaid.`
+      );
+    });
+  });
 
   context.subscriptions.push(registerTreeView(context, store));
   context.subscriptions.push(registerCodeLens(context, store));
