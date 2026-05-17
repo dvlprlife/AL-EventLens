@@ -19,6 +19,21 @@ export type ObjectKind =
 /** What flavor of event a publisher emits. */
 export type EventKind = 'integration' | 'business' | 'trigger';
 
+/**
+ * Friendly-name metadata for a dependency app discovered via
+ * `.alpackages/*.app`. Populated from `NavxManifest.xml`'s `<App Name="..."
+ * Publisher="..."` attributes. Both fields are optional — workspace
+ * publishers contribute no metadata, and old/minimal `.app` packages may
+ * omit them. `appPublisher` is named explicitly (rather than `publisher`)
+ * to avoid colliding with the AL EventLens domain concept of an *event
+ * publisher*.
+ */
+export interface AppMeta {
+  readonly appId: string;
+  readonly name?: string;
+  readonly appPublisher?: string;
+}
+
 /** Identifier for an AL object — the (kind, id, name) triple. */
 export interface ObjectRef {
   readonly kind: ObjectKind;

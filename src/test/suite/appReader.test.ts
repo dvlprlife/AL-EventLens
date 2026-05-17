@@ -50,6 +50,26 @@ suite('symbols/appReader: parseAppBytes happy path', () => {
     assert.deepStrictEqual(contents.bundledAlSources, []);
   });
 
+  test('extracts Name and Publisher attributes when present', async () => {
+    const bytes = await buildAppBytes();
+    const contents = await parseAppBytes(bytes, 'memory://test.app');
+    assert.strictEqual(contents.name, 'Base Application');
+    assert.strictEqual(contents.appPublisher, 'Microsoft');
+  });
+
+  test('Name and Publisher are undefined when the manifest omits them (no throw on the happy path)', async () => {
+    const minimalManifest = `<?xml version="1.0" encoding="utf-8"?>
+<Package>
+  <App Id="11111111-2222-3333-4444-555555555555" Version="1.0.0.0" />
+</Package>`;
+    const bytes = await buildAppBytes({ manifestXml: minimalManifest });
+    const contents = await parseAppBytes(bytes, 'memory://no-meta.app');
+    assert.strictEqual(contents.appId, '11111111-2222-3333-4444-555555555555');
+    assert.strictEqual(contents.version, '1.0.0.0');
+    assert.strictEqual(contents.name, undefined);
+    assert.strictEqual(contents.appPublisher, undefined);
+  });
+
   test('returns bundled AL sources from src/**/*.al', async () => {
     const bytes = await buildAppBytes({
       bundledFiles: {

@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import type { EventKind, ObjectKind, Publisher, Subscriber } from '../../al/types';
+import type { AppMeta, EventKind, ObjectKind, Publisher, Subscriber } from '../../al/types';
 import { EventIndexStore } from '../../index/store';
 import { EventTreeDataProvider, type TreeNode } from '../../ui/treeView';
 
@@ -51,7 +51,8 @@ suite('ui/treeView: EventTreeDataProvider', () => {
           makePublisher('codeunit', 'Purch.-Post', 'OnAfterPostPurchase', { appId: 'Microsoft.SalesMgmt' }),
           makePublisher('codeunit', 'My Workspace Codeunit', 'OnSomething')
         ],
-        subscribers: []
+        subscribers: [],
+        appMeta: new Map()
       });
 
       const provider = new EventTreeDataProvider(store);
@@ -62,7 +63,8 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       assert.strictEqual(roots[1].kind, 'app');
       const appRoots = roots as Array<Extract<TreeNode, { kind: 'app' }>>;
       assert.strictEqual(appRoots[0].label, '(workspace)', '(workspace) must come first');
-      assert.strictEqual(appRoots[1].label, 'Microsoft.SalesMgmt');
+      assert.strictEqual(appRoots[1].label, 'Microsoft.SalesMgmt',
+        'no appMeta entry → label falls back to the raw appId');
     } finally {
       store.dispose();
     }
@@ -79,7 +81,8 @@ suite('ui/treeView: EventTreeDataProvider', () => {
           // case-insensitive name match should still count
           makeSubscriber('codeunit', 'sales-post', 'onafterpostsalesdoc'),
           makeSubscriber('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc')
-        ]
+        ],
+        appMeta: new Map()
       });
 
       const provider = new EventTreeDataProvider(store);
@@ -111,7 +114,7 @@ suite('ui/treeView: EventTreeDataProvider', () => {
         sourceUri: fileUri,
         appId: 'Microsoft.SalesMgmt'
       });
-      store.set({ publishers: [integration, trigger], subscribers: [] });
+      store.set({ publishers: [integration, trigger], subscribers: [], appMeta: new Map() });
 
       const provider = new EventTreeDataProvider(store);
       const roots = provider.getChildren() as TreeNode[];
@@ -156,7 +159,8 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       try {
         store.set({
           publishers: [makePublisher('codeunit', 'C', 'OnX')],
-          subscribers: []
+          subscribers: [],
+          appMeta: new Map()
         });
         assert.strictEqual(fired, 1, 'TreeDataProvider must refresh when the store changes');
 
@@ -171,11 +175,105 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     }
   });
 
+  test('app bucket with appMeta uses Name as label and Publisher as description; appId in tooltip', () => {
+    const store = new EventIndexStore();
+    try {
+      const appId = 'a48bafe5-7032-4f02-87d2-43e2d5e4f1ea';
+      const appMeta = new Map<string, AppMeta>([
+        [appId, { appId, name: 'Sample App', appPublisher: 'Acme Corp' }]
+      ]);
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'Royalty Calc', 'OnAfterPostRoyalty', { appId })
+        ],
+        subscribers: [],
+        appMeta
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const [appNode] = provider.getChildren() as TreeNode[];
+      assert.strictEqual(appNode.kind, 'app');
+      assert.strictEqual((appNode as Extract<TreeNode, { kind: 'app' }>).label, 'Sample App',
+        'label should be the friendly Name from appMeta, not the GUID');
+
+      const item = provider.getTreeItem(appNode);
+      assert.strictEqual(item.label, 'Sample App');
+      assert.strictEqual(item.description, 'Acme Corp', 'description should carry the appPublisher');
+      assert.ok(typeof item.tooltip === 'string', 'tooltip should be a string');
+      assert.ok((item.tooltip as string).includes('Acme Corp — Sample App'),
+        `tooltip should include "Acme Corp — Sample App"; got: ${item.tooltip}`);
+      assert.ok((item.tooltip as string).includes(`appId: ${appId}`),
+        `tooltip should include "appId: ${appId}"; got: ${item.tooltip}`);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('app bucket with no appMeta entry falls back to the appId GUID label', () => {
+    const store = new EventIndexStore();
+    try {
+      const appId = '00000000-0000-0000-0000-000000000999';
+      store.set({
+        publishers: [makePublisher('codeunit', 'Foo', 'OnBar', { appId })],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const [appNode] = provider.getChildren() as TreeNode[];
+      assert.strictEqual((appNode as Extract<TreeNode, { kind: 'app' }>).label, appId);
+
+      const item = provider.getTreeItem(appNode);
+      assert.strictEqual(item.description, undefined,
+        'no appPublisher → no description (rendered as empty in the UI)');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('sort: `(workspace)` first, then case-insensitive alphabetical by displayed label (mix of friendly and GUID)', () => {
+    const store = new EventIndexStore();
+    try {
+      const idMicrosoft = '437dbf0e-84ff-417a-965d-ed2bb9650972';
+      const idAcme Corp   = 'a48bafe5-7032-4f02-87d2-43e2d5e4f1ea';
+      const idAnonymous = '00000000-0000-0000-0000-deadbeefcafe';
+      const appMeta = new Map<string, AppMeta>([
+        [idMicrosoft, { appId: idMicrosoft, name: 'business foundation', appPublisher: 'Microsoft' }],
+        [idAcme Corp,   { appId: idAcme Corp,   name: 'Sample App',     appPublisher: 'Acme Corp'   }]
+      ]);
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'A',  'OnA', { appId: idMicrosoft }),
+          makePublisher('codeunit', 'B',  'OnB', { appId: idAcme Corp }),
+          makePublisher('codeunit', 'C',  'OnC', { appId: idAnonymous }),
+          makePublisher('codeunit', 'W',  'OnW') // workspace
+        ],
+        subscribers: [],
+        appMeta
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const roots = provider.getChildren() as TreeNode[];
+      const labels = roots
+        .filter((n): n is Extract<TreeNode, { kind: 'app' }> => n.kind === 'app')
+        .map((n) => n.label);
+
+      assert.strictEqual(labels[0], '(workspace)', '(workspace) must come first');
+      assert.deepStrictEqual(labels.slice(1), [
+        idAnonymous,           // '00000000-...' sorts before 'b' / 'r'
+        'business foundation', // case-insensitive: 'b' < 'r'
+        'Sample App'
+      ], `sort order wrong; got: ${JSON.stringify(labels)}`);
+    } finally {
+      store.dispose();
+    }
+  });
+
   test('publisher leaf carries `alEventLens.revealPublisher` command with the publisher as identity argument', () => {
     const store = new EventIndexStore();
     try {
       const pub = makePublisher('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc');
-      store.set({ publishers: [pub], subscribers: [] });
+      store.set({ publishers: [pub], subscribers: [], appMeta: new Map() });
 
       const provider = new EventTreeDataProvider(store);
       const [appNode] = provider.getChildren() as TreeNode[];

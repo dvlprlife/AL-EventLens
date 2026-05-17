@@ -15,7 +15,7 @@ import { resolveSubscribers } from './resolver';
  * test-friendly.
  */
 export class EventIndexStore implements vscode.Disposable {
-  private current: EventIndex = { publishers: [], subscribers: [] };
+  private current: EventIndex = { publishers: [], subscribers: [], appMeta: new Map() };
   private readonly _onDidChange = new vscode.EventEmitter<EventIndex>();
 
   /** Fires whenever `set` or `updateFile` mutates the index. */
@@ -60,7 +60,13 @@ export class EventIndexStore implements vscode.Disposable {
     const mergedSubscribers = [...survivingSubscribers, ...subscribers];
     const resolved = resolveSubscribers(mergedPublishers, mergedSubscribers);
 
-    this.current = { publishers: mergedPublishers, subscribers: resolved };
+    // updateFile only touches workspace AL files (which carry no appMeta) —
+    // the dependency-app friendly names pass through unchanged.
+    this.current = {
+      publishers: mergedPublishers,
+      subscribers: resolved,
+      appMeta: this.current.appMeta
+    };
     this._onDidChange.fire(this.current);
   }
 

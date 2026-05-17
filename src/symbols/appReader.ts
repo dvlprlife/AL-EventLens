@@ -5,6 +5,12 @@ import JSZip from 'jszip';
 export interface AppContents {
   readonly appId: string;
   readonly version: string;
+  /** Friendly app name from `NavxManifest.xml`'s `<App Name="..."` attribute, when present. */
+  readonly name?: string;
+  /** App vendor from `NavxManifest.xml`'s `<App Publisher="..."` attribute, when present.
+   *  Named `appPublisher` (not `publisher`) to avoid colliding with the AL EventLens
+   *  domain concept of an *event publisher*. */
+  readonly appPublisher?: string;
   readonly symbolReferenceJson: string;
   /** Bundled AL source files when the package included them under `src/**`. */
   readonly bundledAlSources: ReadonlyArray<{ path: string; text: string }>;
@@ -68,7 +74,7 @@ export async function parseAppBytes(
     );
   }
   const manifestXml = await manifestEntry.async('string');
-  const { appId, version } = parseManifest(manifestXml, sourceLabel);
+  const { appId, version, name, appPublisher } = parseManifest(manifestXml, sourceLabel);
 
   const symbolEntry = zip.file('SymbolReference.json');
   if (!symbolEntry) {
@@ -89,7 +95,7 @@ export async function parseAppBytes(
     bundledAlSources.push({ path, text: await entry.async('string') });
   }
 
-  return { appId, version, symbolReferenceJson, bundledAlSources };
+  return { appId, version, name, appPublisher, symbolReferenceJson, bundledAlSources };
 }
 
 function isBundledAlSource(path: string): boolean {
@@ -100,7 +106,7 @@ function isBundledAlSource(path: string): boolean {
 function parseManifest(
   xml: string,
   sourceLabel: string
-): { appId: string; version: string } {
+): { appId: string; version: string; name?: string; appPublisher?: string } {
   const appElement = /<App\b[^>]*>/i.exec(xml);
   if (!appElement) {
     throw new Error(
@@ -114,5 +120,12 @@ function parseManifest(
       `readApp: NavxManifest.xml <App> element missing Id or Version attribute (source=${sourceLabel})`
     );
   }
-  return { appId: idMatch[1], version: versionMatch[1] };
+  const nameMatch = /\bName\s*=\s*"([^"]+)"/i.exec(appElement[0]);
+  const publisherMatch = /\bPublisher\s*=\s*"([^"]+)"/i.exec(appElement[0]);
+  return {
+    appId: idMatch[1],
+    version: versionMatch[1],
+    name: nameMatch?.[1],
+    appPublisher: publisherMatch?.[1]
+  };
 }

@@ -9,7 +9,27 @@ export interface CacheKey {
   readonly mtime: number;
 }
 
+/** What `loadCachedSymbols` returns on a hit — the publisher list plus the
+ *  friendly-name metadata that was persisted alongside it. */
+export interface CachedAppData {
+  readonly publishers: Publisher[];
+  readonly name?: string;
+  readonly appPublisher?: string;
+}
+
 const SYMBOLS_DIR = 'symbols';
+
+/** Bump whenever the on-disk shape changes. v2 added `name` / `appPublisher`
+ *  alongside the previously-bare publisher array. Older entries (v1, which
+ *  was a top-level array) are silently treated as cache misses. */
+const SCHEMA_VERSION = 2;
+
+interface CachedPayloadV2 {
+  readonly schemaVersion: 2;
+  readonly publishers: Publisher[];
+  readonly name?: string;
+  readonly appPublisher?: string;
+}
 
 /**
  * Sanitize a path segment so it round-trips safely on every platform's
@@ -38,18 +58,19 @@ function isCacheEnabled(): boolean {
 }
 
 /**
- * Load a cached publisher list for the given key, or return undefined if
- * the cache is cold or stale. Storage lives under
- * `extensionContext.globalStorageUri`.
+ * Load a cached publisher list (plus friendly-name metadata) for the
+ * given key, or return undefined if the cache is cold or stale. Storage
+ * lives under `extensionContext.globalStorageUri`.
  *
  * Returns `undefined` (never throws) for any of: caching disabled, file
- * missing, file unreadable, JSON malformed, or payload not an array. The
- * indexer treats `undefined` as a cache miss and re-parses the package.
+ * missing, file unreadable, JSON malformed, payload shape unexpected, or
+ * `schemaVersion` mismatch. The indexer treats `undefined` as a cache
+ * miss and re-parses the package.
  */
 export async function loadCachedSymbols(
   context: vscode.ExtensionContext,
   key: CacheKey
-): Promise<Publisher[] | undefined> {
+): Promise<CachedAppData | undefined> {
   if (!isCacheEnabled()) {
     return undefined;
   }
@@ -65,19 +86,29 @@ export async function loadCachedSymbols(
   } catch {
     return undefined;
   }
-  if (!Array.isArray(parsed)) {
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    (parsed as { schemaVersion?: unknown }).schemaVersion !== SCHEMA_VERSION ||
+    !Array.isArray((parsed as { publishers?: unknown }).publishers)
+  ) {
     return undefined;
   }
+  const payload = parsed as CachedPayloadV2;
   // Cached records intentionally have no `vscode.Location` — see
   // storeCachedSymbols. Cast is safe because every consumer treats
   // `Publisher.location` as optional.
-  return parsed as Publisher[];
+  return {
+    publishers: payload.publishers,
+    name: payload.name,
+    appPublisher: payload.appPublisher
+  };
 }
 
 /**
- * Persist a parsed publisher list under the given key. Subsequent
- * `loadCachedSymbols` calls with the same `(appId, version, mtime)`
- * triple will return the stored value.
+ * Persist a parsed publisher list (and the app's friendly-name metadata)
+ * under the given key. Subsequent `loadCachedSymbols` calls with the same
+ * `(appId, version, mtime)` triple will return the stored value.
  *
  * Strips `vscode.Location` before serializing — `.app` publishers never
  * carry one and the type isn't JSON-safe. Also cleans up any older cache
@@ -87,7 +118,8 @@ export async function loadCachedSymbols(
 export async function storeCachedSymbols(
   context: vscode.ExtensionContext,
   key: CacheKey,
-  publishers: ReadonlyArray<Publisher>
+  publishers: ReadonlyArray<Publisher>,
+  meta?: { name?: string; appPublisher?: string }
 ): Promise<void> {
   if (!isCacheEnabled()) {
     return;
@@ -126,9 +158,15 @@ export async function storeCachedSymbols(
     // readDirectory failed for a reason other than missing-dir; skip cleanup.
   }
 
-  const stripped = publishers.map(({ owner, eventName, kind }) => ({ owner, eventName, kind }));
+  const strippedPublishers = publishers.map(({ owner, eventName, kind }) => ({ owner, eventName, kind }));
+  const payload: CachedPayloadV2 = {
+    schemaVersion: SCHEMA_VERSION,
+    publishers: strippedPublishers as Publisher[],
+    name: meta?.name,
+    appPublisher: meta?.appPublisher
+  };
   await vscode.workspace.fs.writeFile(
     target,
-    new TextEncoder().encode(JSON.stringify(stripped))
+    new TextEncoder().encode(JSON.stringify(payload))
   );
 }

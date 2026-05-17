@@ -61,7 +61,8 @@ suite('index/store: EventIndexStore', () => {
 
       const next: EventIndex = {
         publishers: [makePublisher('codeunit', 'C', 'OnX')],
-        subscribers: []
+        subscribers: [],
+        appMeta: new Map()
       };
       store.set(next);
 
@@ -104,7 +105,8 @@ suite('index/store: EventIndexStore', () => {
         subscribers: [
           makeSubscriber('codeunit', 'X', 'OnX', { uri: fileA }),
           makeSubscriber('codeunit', 'Y', 'OnY', { uri: fileB })
-        ]
+        ],
+        appMeta: new Map()
       });
 
       // Re-save fileA with one new publisher and no subscribers.
@@ -146,7 +148,8 @@ suite('index/store: EventIndexStore', () => {
             sourceUri: fileB
           })
         ],
-        subscribers: []
+        subscribers: [],
+        appMeta: new Map()
       });
 
       // Re-save fileA with a single new trigger publisher.
@@ -179,7 +182,8 @@ suite('index/store: EventIndexStore', () => {
       // Seed with an unresolved subscriber and no publishers.
       store.set({
         publishers: [],
-        subscribers: [makeSubscriber('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc', { uri: subUri })]
+        subscribers: [makeSubscriber('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc', { uri: subUri })],
+        appMeta: new Map()
       });
       assert.strictEqual(store.get().subscribers[0].resolved, false);
 
@@ -209,7 +213,8 @@ suite('index/store: EventIndexStore', () => {
         ],
         subscribers: [
           makeSubscriber('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc', { uri: subUri, resolved: true })
-        ]
+        ],
+        appMeta: new Map()
       });
       assert.strictEqual(store.get().subscribers[0].resolved, true);
 
@@ -231,7 +236,7 @@ suite('index/store: EventIndexStore', () => {
 
     // After dispose, the underlying emitter is disposed; firing it via
     // `set` must not invoke the previously-registered listener.
-    store.set({ publishers: [], subscribers: [] });
+    store.set({ publishers: [], subscribers: [], appMeta: new Map() });
     assert.strictEqual(fired, 0, 'listener should not fire after dispose');
   });
 });

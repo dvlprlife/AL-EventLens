@@ -194,7 +194,8 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
 
       const next: EventIndex = {
         publishers: [makePublisher('My Codeunit', 'OnAfterFoo')],
-        subscribers: [makeSubscriber('My Codeunit', 'OnAfterFoo')]
+        subscribers: [makeSubscriber('My Codeunit', 'OnAfterFoo')],
+        appMeta: new Map()
       };
       store.set(next);
 

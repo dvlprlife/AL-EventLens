@@ -5,12 +5,15 @@ import { readApp } from '../symbols/appReader';
 import { parseSymbolReference } from '../symbols/detect';
 import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
 import { resolveSubscribers } from './resolver';
-import type { ObjectRef, Publisher, Subscriber } from '../al/types';
+import type { AppMeta, ObjectRef, Publisher, Subscriber } from '../al/types';
 
 /** A fully built, resolved event index for one workspace session. */
 export interface EventIndex {
   readonly publishers: ReadonlyArray<Publisher>;
   readonly subscribers: ReadonlyArray<Subscriber>;
+  /** Friendly-name metadata per dependency `appId`. Workspace publishers
+   *  contribute nothing; missing entries fall back to the GUID at display time. */
+  readonly appMeta: ReadonlyMap<string, AppMeta>;
 }
 
 /**
@@ -33,6 +36,7 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
 
   const publishers: Publisher[] = [];
   const subscribers: Subscriber[] = [];
+  const appMeta = new Map<string, AppMeta>();
   // One global dedup map across the entire pipeline. The key includes the
   // owning appId so identically-named objects in different packages are not
   // collapsed, but case-insensitive on name (matching the resolver) so a
@@ -62,10 +66,22 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
         const stat = await vscode.workspace.fs.stat(uri);
         const app = await readApp(uri);
         const key: CacheKey = { appId: app.appId, version: app.version, mtime: stat.mtime };
-        let appPublishers = await loadCachedSymbols(context, key);
-        if (!appPublishers) {
+        const cached = await loadCachedSymbols(context, key);
+        let appPublishers: Publisher[];
+        let appName: string | undefined;
+        let appPublisher: string | undefined;
+        if (cached) {
+          appPublishers = cached.publishers;
+          appName = cached.name;
+          appPublisher = cached.appPublisher;
+        } else {
           appPublishers = parseSymbolReference(app.symbolReferenceJson, app.appId);
-          await storeCachedSymbols(context, key, appPublishers);
+          appName = app.name;
+          appPublisher = app.appPublisher;
+          await storeCachedSymbols(context, key, appPublishers, { name: appName, appPublisher });
+        }
+        if (appName !== undefined || appPublisher !== undefined) {
+          appMeta.set(app.appId, { appId: app.appId, name: appName, appPublisher });
         }
         publishers.push(...appPublishers);
         // Subscribers from bundled sources are NOT cached; bundled-source
@@ -94,5 +110,5 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
   }
 
   const resolved = resolveSubscribers(publishers, subscribers);
-  return { publishers, subscribers: resolved };
+  return { publishers, subscribers: resolved, appMeta };
 }

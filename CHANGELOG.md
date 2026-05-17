@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Changed
+
+- Publishers tree (`src/ui/treeView.ts`) now shows the friendly app `Name` from each `.app`'s `NavxManifest.xml` as the row label, the `Publisher` (vendor) as the row description, and the full `appId` GUID in the tooltip. Buckets without a matching `appMeta` entry — older `.app` packages whose manifest omits `Name` — fall back to the raw GUID. Sort order is now case-insensitive on the displayed label (`(workspace)` still first). To support this, `parseManifest` in `src/symbols/appReader.ts` now extracts the optional `Name` / `Publisher` attributes (no throw when missing), `EventIndex` carries a `ReadonlyMap<string, AppMeta>` propagated through `EventIndexStore`, and the per-`.app` cache schema is bumped to v2 (`{ schemaVersion, publishers, name?, appPublisher? }`); pre-existing v1 cache entries are silently treated as misses and re-parsed. The new field is named `appPublisher` throughout — not `publisher` — to avoid colliding with AL EventLens's domain concept of an *event publisher*.
+
 ### Added
 
 - AL source parser (`src/al/parser.ts`) recognizes publisher (`[IntegrationEvent]`, `[BusinessEvent]`) and subscriber (`[EventSubscriber]`, both pre-BC22 and BC22+ syntaxes) declarations across all AL object kinds, returning typed `Publisher` and `Subscriber` records with `vscode.Location` pointing at the procedure name.

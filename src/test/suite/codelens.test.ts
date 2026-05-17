@@ -150,6 +150,7 @@ suite('ui/codelens: AlEventLensCodeLensProvider.provideCodeLenses', () => {
     try {
       store.set({
         publishers: [],
+        appMeta: new Map(),
         subscribers: [
           makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo'),
           makeSubscriber('codeunit', 'my codeunit', 'onafterfoo'), // case-insensitive match
@@ -225,6 +226,7 @@ suite('ui/codelens: AlEventLensCodeLensProvider.provideCodeLenses', () => {
     try {
       store.set({
         publishers: [],
+        appMeta: new Map(),
         subscribers: [
           makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo'),
           makeSubscriber('codeunit', 'My Codeunit', 'OnBeforeBar')
@@ -264,6 +266,7 @@ suite('ui/codelens: AlEventLensCodeLensProvider.provideCodeLenses', () => {
       try {
         store.set({
           publishers: [],
+          appMeta: new Map(),
           subscribers: Array.from({ length: c.count }, () =>
             makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo'))
         });
@@ -336,9 +339,9 @@ suite('ui/codelens: AlEventLensCodeLensProvider.onDidChangeCodeLenses', () => {
       // Mirror registerCodeLens's wiring: store.onDidChange → provider.fireChange()
       const sub = store.onDidChange(() => provider.fireChange());
       try {
-        store.set({ publishers: [], subscribers: [] });
+        store.set({ publishers: [], subscribers: [], appMeta: new Map() });
         assert.strictEqual(fired, 1, 'must fire once per store change');
-        store.set({ publishers: [], subscribers: [] });
+        store.set({ publishers: [], subscribers: [], appMeta: new Map() });
         assert.strictEqual(fired, 2, 'must fire again on a second store change');
       } finally {
         sub.dispose();
@@ -452,7 +455,7 @@ suite('ui/codelens: registerCodeLens', () => {
       let fired = 0;
       const sub = captured!.onDidChangeCodeLenses(() => fired++);
       try {
-        store.set({ publishers: [], subscribers: [] });
+        store.set({ publishers: [], subscribers: [], appMeta: new Map() });
         assert.strictEqual(fired, 1,
           'live wiring: store.onDidChange must propagate to the registered provider');
       } finally {

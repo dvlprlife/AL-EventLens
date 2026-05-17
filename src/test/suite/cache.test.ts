@@ -81,9 +81,41 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
 
     const loaded = await loadCachedSymbols(ctx, key);
     assert.ok(loaded);
-    assert.strictEqual(loaded!.length, 2);
-    assert.deepStrictEqual(loaded![0], { owner: p1.owner, eventName: p1.eventName, kind: p1.kind });
-    assert.deepStrictEqual(loaded![1], { owner: p2.owner, eventName: p2.eventName, kind: p2.kind });
+    assert.strictEqual(loaded!.publishers.length, 2);
+    assert.deepStrictEqual(loaded!.publishers[0], { owner: p1.owner, eventName: p1.eventName, kind: p1.kind });
+    assert.deepStrictEqual(loaded!.publishers[1], { owner: p2.owner, eventName: p2.eventName, kind: p2.kind });
+    assert.strictEqual(loaded!.name, undefined, 'no meta stored → name undefined');
+    assert.strictEqual(loaded!.appPublisher, undefined, 'no meta stored → appPublisher undefined');
+  });
+
+  test('round-trip: friendly-name metadata (name, appPublisher) survives store/load', async () => {
+    const key: CacheKey = { appId: 'meta-app', version: '1.0', mtime: 100 };
+    await storeCachedSymbols(ctx, key, [makePublisher('A', 'OnFoo')], {
+      name: 'Sample App',
+      appPublisher: 'Acme Corp'
+    });
+    const loaded = await loadCachedSymbols(ctx, key);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.name, 'Sample App');
+    assert.strictEqual(loaded!.appPublisher, 'Acme Corp');
+    assert.strictEqual(loaded!.publishers.length, 1);
+  });
+
+  test('old (v1) bare-array cache files are silently ignored on load', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`);
+    // v1 shape: bare publisher array, no schemaVersion / wrapper.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify([
+        { owner: { kind: 'codeunit', name: 'Old' }, eventName: 'OnLegacy', kind: 'integration' }
+      ]))
+    );
+    const result = await loadCachedSymbols(ctx, key);
+    assert.strictEqual(result, undefined,
+      'v1 cache payloads must be treated as misses so the indexer re-parses and captures friendly-name metadata');
   });
 
   test('mtime mismatch returns undefined', async () => {
@@ -178,7 +210,8 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
 
     const loaded = await loadCachedSymbols(ctx, key);
     assert.ok(loaded);
-    assert.strictEqual(loaded!.length, 1);
-    assert.ok(!('location' in loaded![0]), `location must be stripped, got: ${JSON.stringify(loaded![0])}`);
+    assert.strictEqual(loaded!.publishers.length, 1);
+    assert.ok(!('location' in loaded!.publishers[0]),
+      `location must be stripped, got: ${JSON.stringify(loaded!.publishers[0])}`);
   });
 });

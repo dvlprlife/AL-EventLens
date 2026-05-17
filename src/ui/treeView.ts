@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { ObjectKind, Publisher } from '../al/types';
+import type { AppMeta, ObjectKind, Publisher } from '../al/types';
 import { countSubscribersByPublisherKey, publisherKey } from '../index/match';
 import { EventIndexStore } from '../index/store';
 
@@ -10,7 +10,12 @@ import { EventIndexStore } from '../index/store';
 interface AppNode {
   readonly kind: 'app';
   readonly appId: string;
+  /** Displayed text for the tree row — friendly `Name` from the manifest
+   *  when available, otherwise the raw `appId` GUID. */
   readonly label: string;
+  /** Vendor (`Publisher` attribute) from the manifest, when present. Empty
+   *  string when missing (which `TreeItem.description` renders as nothing). */
+  readonly appPublisher: string;
   readonly publishers: ReadonlyArray<Publisher>;
 }
 
@@ -56,8 +61,13 @@ function formatPublisherLabel(p: Publisher, count: number): string {
   return `${formatKind(p.owner.kind)}::"${p.owner.name}" · ${p.eventName} · (${count})`;
 }
 
-/** Group publishers by `owner.appId`; `undefined` → `(workspace)` bucket. */
-function groupByApp(publishers: ReadonlyArray<Publisher>): AppNode[] {
+/** Group publishers by `owner.appId`; `undefined` → `(workspace)` bucket.
+ *  Resolves friendly names from `appMeta` when available, falling back to
+ *  the raw GUID. */
+function groupByApp(
+  publishers: ReadonlyArray<Publisher>,
+  appMeta: ReadonlyMap<string, AppMeta>
+): AppNode[] {
   const buckets = new Map<string, Publisher[]>();
   for (const p of publishers) {
     const key = p.owner.appId ?? WORKSPACE_BUCKET;
@@ -71,9 +81,21 @@ function groupByApp(publishers: ReadonlyArray<Publisher>): AppNode[] {
 
   const nodes: AppNode[] = [];
   for (const [appId, bucketPublishers] of buckets) {
-    nodes.push({ kind: 'app', appId, label: appId, publishers: bucketPublishers });
+    if (appId === WORKSPACE_BUCKET) {
+      nodes.push({ kind: 'app', appId, label: WORKSPACE_BUCKET, appPublisher: '', publishers: bucketPublishers });
+      continue;
+    }
+    const meta = appMeta.get(appId);
+    nodes.push({
+      kind: 'app',
+      appId,
+      label: meta?.name ?? appId,
+      appPublisher: meta?.appPublisher ?? '',
+      publishers: bucketPublishers
+    });
   }
-  // `(workspace)` always first; everything else alphabetical by label.
+  // `(workspace)` always first; everything else case-insensitive alphabetical
+  // by displayed label.
   nodes.sort((a, b) => {
     if (a.label === WORKSPACE_BUCKET) {
       return b.label === WORKSPACE_BUCKET ? 0 : -1;
@@ -81,7 +103,7 @@ function groupByApp(publishers: ReadonlyArray<Publisher>): AppNode[] {
     if (b.label === WORKSPACE_BUCKET) {
       return 1;
     }
-    return a.label.localeCompare(b.label);
+    return a.label.localeCompare(b.label, undefined, { sensitivity: 'accent' });
   });
   return nodes;
 }
@@ -106,7 +128,18 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
       );
     }
     if (node.kind === 'app') {
-      return new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Collapsed);
+      const item = new vscode.TreeItem(node.label, vscode.TreeItemCollapsibleState.Collapsed);
+      if (node.appPublisher) {
+        item.description = node.appPublisher;
+      }
+      if (node.appId !== WORKSPACE_BUCKET) {
+        const tooltipLines: string[] = [];
+        if (node.appPublisher) { tooltipLines.push(`${node.appPublisher} — ${node.label}`); }
+        else                   { tooltipLines.push(node.label); }
+        tooltipLines.push(`appId: ${node.appId}`);
+        item.tooltip = tooltipLines.join('\n');
+      }
+      return item;
     }
     // publisher leaf
     const item = new vscode.TreeItem(
@@ -128,7 +161,7 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
       if (index.publishers.length === 0) {
         return [{ kind: 'empty' }];
       }
-      return groupByApp(index.publishers);
+      return groupByApp(index.publishers, index.appMeta);
     }
 
     if (node.kind === 'app') {
