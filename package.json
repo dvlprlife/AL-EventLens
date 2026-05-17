@@ -39,7 +39,7 @@
         {
           "id": "alEventLens",
           "title": "AL EventLens",
-          "icon": "images/icon.png"
+          "icon": "images/activity-bar.svg"
         }
       ]
     },
