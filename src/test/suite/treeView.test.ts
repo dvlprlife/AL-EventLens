@@ -366,6 +366,52 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     }
   });
 
+  test('KindNode and ObjectNode TreeItems carry an aggregate event-count description', () => {
+    const store = new EventIndexStore();
+    try {
+      store.set({
+        publishers: [
+          // Codeunit / Sales-Post · 3 events
+          makePublisher('codeunit', 'Sales-Post', 'OnAfter'),
+          makePublisher('codeunit', 'Sales-Post', 'OnBefore'),
+          makePublisher('codeunit', 'Sales-Post', 'OnDuring'),
+          // Codeunit / Item-Post · 1 event
+          makePublisher('codeunit', 'Item-Post', 'OnAfter'),
+          // Table / Customer · 2 events
+          makePublisher('table', 'Customer', 'OnInsert'),
+          makePublisher('table', 'Customer', 'OnDelete')
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const [appNode] = provider.getChildren() as TreeNode[];
+      const kindNodes = provider.getChildren(appNode) as TreeNode[];
+      const kindLabels = new Map<string, vscode.TreeItem>();
+      for (const kn of kindNodes) {
+        const item = provider.getTreeItem(kn);
+        kindLabels.set(item.label as string, item);
+      }
+      assert.strictEqual(kindLabels.get('Codeunit')!.description, '4', 'Codeunit has 4 events total');
+      assert.strictEqual(kindLabels.get('Table')!.description, '2', 'Table has 2 events total');
+
+      const codeunitKindNode = kindNodes.find(
+        (n) => provider.getTreeItem(n).label === 'Codeunit'
+      ) as Extract<TreeNode, { kind: 'kind' }>;
+      const objectNodes = provider.getChildren(codeunitKindNode) as TreeNode[];
+      const objectByName = new Map<string, vscode.TreeItem>();
+      for (const on of objectNodes) {
+        const item = provider.getTreeItem(on);
+        objectByName.set(item.label as string, item);
+      }
+      assert.strictEqual(objectByName.get('Sales-Post')!.description, '3');
+      assert.strictEqual(objectByName.get('Item-Post')!.description, '1');
+    } finally {
+      store.dispose();
+    }
+  });
+
   test('ObjectNode children are EventNodes sorted by event name; multiple events on the same object live together', () => {
     const store = new EventIndexStore();
     try {

@@ -189,10 +189,14 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
       return item;
     }
     if (node.kind === 'kind') {
-      return new vscode.TreeItem(formatKind(node.objectKind), vscode.TreeItemCollapsibleState.Collapsed);
+      const item = new vscode.TreeItem(formatKind(node.objectKind), vscode.TreeItemCollapsibleState.Collapsed);
+      item.description = String(node.publishers.length);
+      return item;
     }
     if (node.kind === 'object') {
-      return new vscode.TreeItem(node.objectName, vscode.TreeItemCollapsibleState.Collapsed);
+      const item = new vscode.TreeItem(node.objectName, vscode.TreeItemCollapsibleState.Collapsed);
+      item.description = String(node.publishers.length);
+      return item;
     }
     // event leaf
     const label = `${node.publisher.eventName} · (${node.subscriberCount})`;
