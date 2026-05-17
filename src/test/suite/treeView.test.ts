@@ -184,7 +184,7 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       ]);
       store.set({
         publishers: [
-          makePublisher('codeunit', 'Royalty Calc', 'OnAfterPostRoyalty', { appId })
+          makePublisher('codeunit', 'Sample Calc', 'OnAfterPostSample', { appId })
         ],
         subscribers: [],
         appMeta
@@ -235,16 +235,16 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     const store = new EventIndexStore();
     try {
       const idMicrosoft = '437dbf0e-84ff-417a-965d-ed2bb9650972';
-      const idAcme Corp   = 'a48bafe5-7032-4f02-87d2-43e2d5e4f1ea';
+      const idAcme      = 'a48bafe5-7032-4f02-87d2-43e2d5e4f1ea';
       const idAnonymous = '00000000-0000-0000-0000-deadbeefcafe';
       const appMeta = new Map<string, AppMeta>([
         [idMicrosoft, { appId: idMicrosoft, name: 'business foundation', appPublisher: 'Microsoft' }],
-        [idAcme Corp,   { appId: idAcme Corp,   name: 'Sample App',     appPublisher: 'Acme Corp'   }]
+        [idAcme,      { appId: idAcme,      name: 'Sample App',          appPublisher: 'Acme Corp' }]
       ]);
       store.set({
         publishers: [
           makePublisher('codeunit', 'A',  'OnA', { appId: idMicrosoft }),
-          makePublisher('codeunit', 'B',  'OnB', { appId: idAcme Corp }),
+          makePublisher('codeunit', 'B',  'OnB', { appId: idAcme }),
           makePublisher('codeunit', 'C',  'OnC', { appId: idAnonymous }),
           makePublisher('codeunit', 'W',  'OnW') // workspace
         ],
@@ -260,8 +260,8 @@ suite('ui/treeView: EventTreeDataProvider', () => {
 
       assert.strictEqual(labels[0], '(workspace)', '(workspace) must come first');
       assert.deepStrictEqual(labels.slice(1), [
-        idAnonymous,           // '00000000-...' sorts before 'b' / 'r'
-        'business foundation', // case-insensitive: 'b' < 'r'
+        idAnonymous,           // '00000000-...' sorts before 'b' / 's'
+        'business foundation', // case-insensitive: 'b' < 's'
         'Sample App'
       ], `sort order wrong; got: ${JSON.stringify(labels)}`);
     } finally {

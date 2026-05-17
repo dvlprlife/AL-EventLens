@@ -73,9 +73,8 @@ end with the architecture decisions below.
   (not Node `fs`) and a browser-compatible zip lib (JSZip).
 
 ## Validated in POC (Python prototype, see prior chat)
-- Tested against four real `.app` files: Acme Corp SampleApp,
-  Microsoft Business Foundation, Microsoft Test Runner, Vendor Module
-  Sample App Enhancements.
+- Tested against four real `.app` files (Microsoft BaseApp,
+  Business Foundation, Test Runner, plus a third-party extension).
 - ~30 ms to index all four apps end-to-end.
 - 162 publishers, 54 subscribers found.
 - 33/54 subscriber→publisher links resolved without BaseApp loaded
