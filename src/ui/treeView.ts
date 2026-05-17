@@ -5,23 +5,35 @@ import { EventIndexStore } from '../index/store';
 
 // ─── Tree node model ────────────────────────────────────────────────────
 
-/** Root-level grouping node: one per source app (`(workspace)` for the
+/** Root-level grouping: one per source app (`(workspace)` for the
  *  workspace bucket). */
 interface AppNode {
   readonly kind: 'app';
   readonly appId: string;
-  /** Displayed text for the tree row — friendly `Name` from the manifest
-   *  when available, otherwise the raw `appId` GUID. */
   readonly label: string;
-  /** Vendor (`Publisher` attribute) from the manifest, when present. Empty
-   *  string when missing (which `TreeItem.description` renders as nothing). */
   readonly appPublisher: string;
   readonly publishers: ReadonlyArray<Publisher>;
 }
 
-/** Leaf node: a single publisher, with its currently-resolved subscriber count. */
-interface PublisherNode {
-  readonly kind: 'publisher';
+/** Mid-level grouping: one per AL object kind (Codeunit, Table, Page, ...)
+ *  within an app bucket. */
+interface KindNode {
+  readonly kind: 'kind';
+  readonly objectKind: ObjectKind;
+  readonly publishers: ReadonlyArray<Publisher>;
+}
+
+/** Mid-level grouping: one per AL object (e.g. `Sales-Post`) within a kind bucket. */
+interface ObjectNode {
+  readonly kind: 'object';
+  readonly objectKind: ObjectKind;
+  readonly objectName: string;
+  readonly publishers: ReadonlyArray<Publisher>;
+}
+
+/** Leaf: a single publisher event, with its live subscriber count. */
+interface EventNode {
+  readonly kind: 'event';
   readonly publisher: Publisher;
   readonly subscriberCount: number;
 }
@@ -31,13 +43,13 @@ interface EmptyNode {
   readonly kind: 'empty';
 }
 
-export type TreeNode = AppNode | PublisherNode | EmptyNode;
+export type TreeNode = AppNode | KindNode | ObjectNode | EventNode | EmptyNode;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const WORKSPACE_BUCKET = '(workspace)';
 
-/** AL kind label-cased for the leaf prefix (`Codeunit`, `TableExtension`, ...). */
+/** AL kind label-cased for display (`Codeunit`, `TableExtension`, ...). */
 function formatKind(kind: ObjectKind): string {
   switch (kind) {
     case 'codeunit':         return 'Codeunit';
@@ -56,14 +68,8 @@ function formatKind(kind: ObjectKind): string {
   }
 }
 
-/** `Codeunit::"Sales-Post" · OnAfterPostSalesDoc · (3)` */
-function formatPublisherLabel(p: Publisher, count: number): string {
-  return `${formatKind(p.owner.kind)}::"${p.owner.name}" · ${p.eventName} · (${count})`;
-}
-
 /** Group publishers by `owner.appId`; `undefined` → `(workspace)` bucket.
- *  Resolves friendly names from `appMeta` when available, falling back to
- *  the raw GUID. */
+ *  Resolves friendly names from `appMeta` when available. */
 function groupByApp(
   publishers: ReadonlyArray<Publisher>,
   appMeta: ReadonlyMap<string, AppMeta>
@@ -94,8 +100,6 @@ function groupByApp(
       publishers: bucketPublishers
     });
   }
-  // `(workspace)` always first; everything else case-insensitive alphabetical
-  // by displayed label.
   nodes.sort((a, b) => {
     if (a.label === WORKSPACE_BUCKET) {
       return b.label === WORKSPACE_BUCKET ? 0 : -1;
@@ -105,6 +109,49 @@ function groupByApp(
     }
     return a.label.localeCompare(b.label, undefined, { sensitivity: 'accent' });
   });
+  return nodes;
+}
+
+/** Group publishers by AL object kind, sorted alphabetically by display label. */
+function groupByKind(publishers: ReadonlyArray<Publisher>): KindNode[] {
+  const buckets = new Map<ObjectKind, Publisher[]>();
+  for (const p of publishers) {
+    let bucket = buckets.get(p.owner.kind);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(p.owner.kind, bucket);
+    }
+    bucket.push(p);
+  }
+  const nodes: KindNode[] = [];
+  for (const [objectKind, bucketPublishers] of buckets) {
+    nodes.push({ kind: 'kind', objectKind, publishers: bucketPublishers });
+  }
+  nodes.sort((a, b) => formatKind(a.objectKind).localeCompare(formatKind(b.objectKind)));
+  return nodes;
+}
+
+/** Group publishers by object name within a single-kind bucket. */
+function groupByObject(publishers: ReadonlyArray<Publisher>): ObjectNode[] {
+  const buckets = new Map<string, Publisher[]>();
+  for (const p of publishers) {
+    let bucket = buckets.get(p.owner.name);
+    if (!bucket) {
+      bucket = [];
+      buckets.set(p.owner.name, bucket);
+    }
+    bucket.push(p);
+  }
+  const nodes: ObjectNode[] = [];
+  for (const [objectName, bucketPublishers] of buckets) {
+    nodes.push({
+      kind: 'object',
+      objectKind: bucketPublishers[0].owner.kind,
+      objectName,
+      publishers: bucketPublishers
+    });
+  }
+  nodes.sort((a, b) => a.objectName.localeCompare(b.objectName, undefined, { sensitivity: 'accent' }));
   return nodes;
 }
 
@@ -141,11 +188,15 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
       }
       return item;
     }
-    // publisher leaf
-    const item = new vscode.TreeItem(
-      formatPublisherLabel(node.publisher, node.subscriberCount),
-      vscode.TreeItemCollapsibleState.None
-    );
+    if (node.kind === 'kind') {
+      return new vscode.TreeItem(formatKind(node.objectKind), vscode.TreeItemCollapsibleState.Collapsed);
+    }
+    if (node.kind === 'object') {
+      return new vscode.TreeItem(node.objectName, vscode.TreeItemCollapsibleState.Collapsed);
+    }
+    // event leaf
+    const label = `${node.publisher.eventName} · (${node.subscriberCount})`;
+    const item = new vscode.TreeItem(label, vscode.TreeItemCollapsibleState.None);
     item.command = {
       command: 'alEventLens.revealPublisher',
       title: 'Reveal Publisher',
@@ -165,29 +216,34 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
     }
 
     if (node.kind === 'app') {
+      return groupByKind(node.publishers);
+    }
+
+    if (node.kind === 'kind') {
+      return groupByObject(node.publishers);
+    }
+
+    if (node.kind === 'object') {
       const counts = countSubscribersByPublisherKey(index.subscribers);
-      const sorted = [...node.publishers].sort((a, b) => {
-        const byOwner = a.owner.name.localeCompare(b.owner.name, undefined, { sensitivity: 'accent' });
-        if (byOwner !== 0) {
-          return byOwner;
-        }
-        return a.eventName.localeCompare(b.eventName, undefined, { sensitivity: 'accent' });
-      });
-      return sorted.map<PublisherNode>((p) => ({
-        kind: 'publisher',
+      const sorted = [...node.publishers].sort((a, b) =>
+        a.eventName.localeCompare(b.eventName, undefined, { sensitivity: 'accent' })
+      );
+      return sorted.map<EventNode>((p) => ({
+        kind: 'event',
         publisher: p,
         subscriberCount: counts.get(publisherKey(p)) ?? 0
       }));
     }
 
-    // publisher / empty leaves have no children
+    // event / empty leaves have no children
     return [];
   }
 }
 
 /**
  * Register the activity-bar TreeView (`alEventLensView`) listing
- * publishers grouped by source app. The returned disposable owns the
+ * publishers grouped by source app, then by AL object kind, then by
+ * object name, then by event. The returned disposable owns the
  * `TreeView` itself plus the store subscription, so a single
  * `context.subscriptions.push(...)` cleans up both on extension shutdown.
  */

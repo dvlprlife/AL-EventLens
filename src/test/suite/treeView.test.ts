@@ -70,7 +70,7 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     }
   });
 
-  test('publisher leaf label includes the subscriber count `(N)` — both 0 and >0', () => {
+  test('event leaf label is `<EventName> · (N)` with the live subscriber count — both 0 and >0', () => {
     const store = new EventIndexStore();
     try {
       const pubA = makePublisher('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc');
@@ -87,22 +87,28 @@ suite('ui/treeView: EventTreeDataProvider', () => {
 
       const provider = new EventTreeDataProvider(store);
       const [appNode] = provider.getChildren() as TreeNode[];
-      assert.strictEqual(appNode.kind, 'app');
-      const leaves = provider.getChildren(appNode) as TreeNode[];
+      const [kindNode] = provider.getChildren(appNode) as TreeNode[];
+      assert.strictEqual(kindNode.kind, 'kind');
+      const objectNodes = provider.getChildren(kindNode) as TreeNode[];
+      assert.strictEqual(objectNodes.length, 2, 'two distinct AL objects expected');
 
-      // Sorted by owner.name then eventName, case-insensitive: 'NoListenersHere', 'Sales-Post'
-      assert.strictEqual(leaves.length, 2);
-      const labels = leaves.map((n) => provider.getTreeItem(n).label as string);
-      const matched = labels.find((l) => l.includes('"Sales-Post"'));
-      const unmatched = labels.find((l) => l.includes('"NoListenersHere"'));
-      assert.ok(matched && matched.endsWith(' · (2)'), `expected '(2)' suffix, got: ${matched}`);
-      assert.ok(unmatched && unmatched.endsWith(' · (0)'), `expected '(0)' suffix, got: ${unmatched}`);
+      const labels = new Map<string, string>();
+      for (const obj of objectNodes) {
+        assert.strictEqual(obj.kind, 'object');
+        const [event] = provider.getChildren(obj) as TreeNode[];
+        labels.set(
+          (obj as Extract<TreeNode, { kind: 'object' }>).objectName,
+          provider.getTreeItem(event).label as string
+        );
+      }
+      assert.strictEqual(labels.get('Sales-Post'), 'OnAfterPostSalesDoc · (2)');
+      assert.strictEqual(labels.get('NoListenersHere'), 'OnIdle · (0)');
     } finally {
       store.dispose();
     }
   });
 
-  test('trigger publishers appear in the same bucket as integration publishers, with the same label format', () => {
+  test('trigger publishers coexist with integration publishers under the same AppNode but in different KindNodes', () => {
     const store = new EventIndexStore();
     try {
       const fileUri = vscode.Uri.parse('file:///workspace/MyTable.al');
@@ -119,12 +125,20 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       const provider = new EventTreeDataProvider(store);
       const roots = provider.getChildren() as TreeNode[];
       assert.strictEqual(roots.length, 1, 'single app bucket — both share appId');
-      const leaves = provider.getChildren(roots[0]) as TreeNode[];
-      assert.strictEqual(leaves.length, 2, 'integration and trigger must coexist under the same AppNode');
 
-      const labels = leaves.map((n) => provider.getTreeItem(n).label as string);
-      assert.ok(labels.some((l) => l.startsWith('Codeunit::"Sales-Post" · OnAfterPostSalesDoc · (')));
-      assert.ok(labels.some((l) => l.startsWith('Table::"MyTable" · OnAfterInsertEvent · (')));
+      const kindNodes = provider.getChildren(roots[0]) as TreeNode[];
+      assert.strictEqual(kindNodes.length, 2, 'one KindNode per ObjectKind under the AppNode');
+      const kindLabels = kindNodes.map((n) => provider.getTreeItem(n).label as string);
+      // Alphabetical: 'Codeunit' < 'Table'
+      assert.deepStrictEqual(kindLabels, ['Codeunit', 'Table']);
+
+      // Each KindNode has its lone ObjectNode with its lone EventNode.
+      for (const kn of kindNodes) {
+        const objs = provider.getChildren(kn) as TreeNode[];
+        assert.strictEqual(objs.length, 1);
+        const events = provider.getChildren(objs[0]) as TreeNode[];
+        assert.strictEqual(events.length, 1);
+      }
     } finally {
       store.dispose();
     }
@@ -269,7 +283,7 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     }
   });
 
-  test('publisher leaf carries `alEventLens.revealPublisher` command with the publisher as identity argument', () => {
+  test('event leaf carries `alEventLens.revealPublisher` command with the publisher as identity argument', () => {
     const store = new EventIndexStore();
     try {
       const pub = makePublisher('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc');
@@ -277,16 +291,103 @@ suite('ui/treeView: EventTreeDataProvider', () => {
 
       const provider = new EventTreeDataProvider(store);
       const [appNode] = provider.getChildren() as TreeNode[];
-      const [leaf] = provider.getChildren(appNode) as TreeNode[];
-      const item = provider.getTreeItem(leaf);
+      const [kindNode] = provider.getChildren(appNode) as TreeNode[];
+      const [objectNode] = provider.getChildren(kindNode) as TreeNode[];
+      const [event] = provider.getChildren(objectNode) as TreeNode[];
+      const item = provider.getTreeItem(event);
 
-      assert.ok(item.command, 'leaf must carry a command');
+      assert.ok(item.command, 'event leaf must carry a command');
       assert.strictEqual(item.command.command, 'alEventLens.revealPublisher');
       assert.strictEqual(item.command.title, 'Reveal Publisher');
       assert.ok(Array.isArray(item.command.arguments), 'command.arguments must be an array');
       assert.strictEqual(item.command.arguments.length, 1);
       assert.strictEqual(item.command.arguments[0], pub,
         'argument must be the same publisher instance (identity, not copy)');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('AppNode children are KindNodes — one per ObjectKind, sorted alphabetically by display label', () => {
+    const store = new EventIndexStore();
+    try {
+      store.set({
+        publishers: [
+          makePublisher('xmlport',         'Foo',    'OnX'),
+          makePublisher('codeunit',        'Bar',    'OnB'),
+          makePublisher('table',           'Baz',    'OnT'),
+          makePublisher('codeunit',        'Qux',    'OnC'),
+          makePublisher('pageextension',   'PageX',  'OnP')
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const [appNode] = provider.getChildren() as TreeNode[];
+      const kindNodes = provider.getChildren(appNode) as TreeNode[];
+      assert.strictEqual(kindNodes.length, 4, 'one KindNode per distinct kind (two codeunits collapse)');
+      const labels = kindNodes.map((n) => provider.getTreeItem(n).label as string);
+      assert.deepStrictEqual(labels, ['Codeunit', 'PageExtension', 'Table', 'XmlPort'],
+        'KindNodes must be sorted alphabetically by formatted label');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('KindNode children are ObjectNodes — one per owner.name, sorted case-insensitively', () => {
+    const store = new EventIndexStore();
+    try {
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'zeta',  'OnZ'),
+          makePublisher('codeunit', 'Alpha', 'OnA1'),
+          makePublisher('codeunit', 'Alpha', 'OnA2'),
+          makePublisher('codeunit', 'beta',  'OnB')
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const [appNode] = provider.getChildren() as TreeNode[];
+      const [kindNode] = provider.getChildren(appNode) as TreeNode[];
+      const objectNodes = provider.getChildren(kindNode) as TreeNode[];
+      const names = objectNodes
+        .map((n) => (n as Extract<TreeNode, { kind: 'object' }>).objectName);
+      assert.deepStrictEqual(names, ['Alpha', 'beta', 'zeta'],
+        'ObjectNodes must be sorted case-insensitively by object name');
+
+      const labels = objectNodes.map((n) => provider.getTreeItem(n).label as string);
+      assert.deepStrictEqual(labels, ['Alpha', 'beta', 'zeta'],
+        'ObjectNode TreeItem label is the bare object name (no kind prefix, no quotes)');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('ObjectNode children are EventNodes sorted by event name; multiple events on the same object live together', () => {
+    const store = new EventIndexStore();
+    try {
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'Sales-Post', 'OnBeforePostSalesDoc'),
+          makePublisher('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc')
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const [appNode] = provider.getChildren() as TreeNode[];
+      const [kindNode] = provider.getChildren(appNode) as TreeNode[];
+      const [objectNode] = provider.getChildren(kindNode) as TreeNode[];
+      const events = provider.getChildren(objectNode) as TreeNode[];
+      const labels = events.map((n) => provider.getTreeItem(n).label as string);
+      assert.deepStrictEqual(labels, [
+        'OnAfterPostSalesDoc · (0)',
+        'OnBeforePostSalesDoc · (0)'
+      ], 'events sorted alphabetically and labeled `<event> · (N)`');
     } finally {
       store.dispose();
     }
