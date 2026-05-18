@@ -42,6 +42,16 @@ export function activate(context: vscode.ExtensionContext): void {
     // Reconstruct both pieces so showTextDocument gets canonical instances.
     const loc = args[0] as { uri: vscode.Uri; range: vscode.Range };
     const uri = vscode.Uri.from(loc.uri);
+    // Subscribers parsed from a .app's bundled src/**/*.al carry a synthetic
+    // `al-eventlens-app:` URI (see indexer.ts). VS Code can't open that
+    // scheme — no FileSystemProvider is registered — so surface a friendly
+    // notice instead of letting showTextDocument throw a generic error.
+    if (uri.scheme === 'al-eventlens-app') {
+      void vscode.window.showInformationMessage(
+        'AL EventLens: this subscriber lives inside a packaged .app and its source is not directly openable.'
+      );
+      return;
+    }
     const range = new vscode.Range(
       loc.range.start.line, loc.range.start.character,
       loc.range.end.line,   loc.range.end.character
