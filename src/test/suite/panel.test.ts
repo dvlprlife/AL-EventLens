@@ -180,6 +180,20 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     assert.ok(/searchEl\.value\s*=\s*m\.search/.test(html),
       'reveal handler must assign m.search into the search input');
   });
+
+  test('embeds the AL-style identity-selector parser (`<kind>::<name>` / `<kind>::"name"`)', () => {
+    const html = renderPanelHtml('nonce123');
+    // The exact regex literal used to detect identity tokens — strong signal
+    // the parser branch is wired in renderPanelHtml's inline JS.
+    assert.ok(html.includes('/^(\\w+)::(?:"([^"]*)"|(\\S+))$/'),
+      'parseSearch must contain the identity-selector regex literal');
+    assert.ok(html.includes('objectIdentity'),
+      'passesFilter / buildSearchText must reference objectIdentity');
+    // Dropping objectIdentity when the kind dropdown changes is the only
+    // way to keep dropdown-driven and identity-driven filters consistent.
+    assert.ok(/parsed\.objectIdentity\s*=\s*null/.test(html),
+      'applyToken must clear objectIdentity when the kind dropdown changes');
+  });
 });
 
 suite('ui/panel: openPanel singleton + store wiring', () => {
@@ -348,7 +362,7 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
     }
   });
 
-  test('postRevealObjectToPanel: workspace owner builds app:(workspace) + kind + object search, no selectKey', () => {
+  test('postRevealObjectToPanel: emits AL-style identity selector (`<kind>::<name>`), no app filter, no selectKey', () => {
     patchCreate();
     const store = new EventIndexStore();
     try {
@@ -356,14 +370,15 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
       const fake = createCalls[0];
       const before = fake.posts.length;
 
-      postRevealObjectToPanel({ appId: undefined, kind: 'codeunit', name: 'MyCu' });
+      postRevealObjectToPanel({ kind: 'codeunit', name: 'MyCu' });
 
       assert.strictEqual(fake.posts.length, before + 1);
       const last = fake.posts[fake.posts.length - 1] as {
         type: string; search: string; selectKey?: string;
       };
       assert.strictEqual(last.type, 'reveal');
-      assert.strictEqual(last.search, 'app:(workspace) kind:codeunit object:MyCu');
+      // Names without spaces are emitted unquoted; no app: token; no kind: token.
+      assert.strictEqual(last.search, 'codeunit::MyCu');
       assert.strictEqual(last.selectKey, undefined,
         'reveal-object without a publisher must not include a selectKey');
     } finally {
@@ -371,20 +386,21 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
     }
   });
 
-  test('postRevealObjectToPanel: .app owner uses the appId GUID for the app: token', () => {
+  test('postRevealObjectToPanel: object names with spaces are quoted inside the identity selector', () => {
     patchCreate();
     const store = new EventIndexStore();
     try {
       openPanel(fakeContext, store);
       const fake = createCalls[0];
-      const APP_ID = '11111111-1111-1111-1111-111111111111';
 
-      postRevealObjectToPanel({ appId: APP_ID, kind: 'table', name: 'Sales Header' });
+      // Same object name in two different .app packages would surface together
+      // under this filter (deliberate — no app filter is emitted), but the
+      // assertion here is purely on the search string shape for names with
+      // whitespace.
+      postRevealObjectToPanel({ kind: 'table', name: 'Sales Header' });
 
       const last = fake.posts[fake.posts.length - 1] as { search: string };
-      // Sales Header has a space, so the object: token must be quoted to
-      // survive tokenizeSearch as a single token.
-      assert.strictEqual(last.search, `app:${APP_ID} kind:table object:"Sales Header"`);
+      assert.strictEqual(last.search, 'table::"Sales Header"');
     } finally {
       store.dispose();
     }
@@ -404,7 +420,7 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
         type: string; search: string; selectKey: string;
       };
       assert.strictEqual(last.type, 'reveal');
-      assert.strictEqual(last.search, 'app:(workspace) kind:codeunit object:MyCu');
+      assert.strictEqual(last.search, 'codeunit::MyCu');
       // selectKey shape matches publisherKey() — case-insensitive triple.
       assert.strictEqual(last.selectKey, 'codeunit mycu onafterfoo');
       assert.strictEqual(getSelectedPublisher(), pub,
@@ -416,7 +432,7 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
 
   test('postRevealObjectToPanel: no-op when no panel is open', () => {
     // No patchCreate / openPanel — activePanel stays undefined.
-    postRevealObjectToPanel({ appId: undefined, kind: 'codeunit', name: 'X' });
+    postRevealObjectToPanel({ kind: 'codeunit', name: 'X' });
     // Nothing to assert on a fake panel since one was never created; the test
     // passes if the call returns without throwing.
     assert.ok(true);
