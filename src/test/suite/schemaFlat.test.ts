@@ -229,3 +229,172 @@ suite('symbols/schemaFlat: extractPublishersFromContainer', () => {
     assert.deepStrictEqual(extractPublishersFromContainer('x', APP_ID), []);
   });
 });
+
+suite('symbols/schemaFlat: publisher parameters', () => {
+  test('extracts Parameters[] with IsVar + Subtype Record', () => {
+    const json = {
+      Codeunits: [
+        {
+          Id: 50100,
+          Name: 'Sales-Post',
+          Methods: [
+            {
+              Name: 'OnAfterPostSalesOrder',
+              Attributes: [{ Name: 'IntegrationEvent' }],
+              Parameters: [
+                {
+                  Name: 'SalesHeader',
+                  TypeDefinition: { Name: 'Record', Subtype: { Name: 'Sales Header' } },
+                  IsVar: true
+                },
+                {
+                  Name: 'CommitIsSuppressed',
+                  TypeDefinition: { Name: 'Boolean' },
+                  IsVar: false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'SalesHeader', typeText: 'Record "Sales Header"', isVar: true },
+      { name: 'CommitIsSuppressed', typeText: 'Boolean', isVar: false }
+    ]);
+  });
+
+  test('Code/Text Length renders as Code[N] / Text[N]', () => {
+    const json = {
+      Codeunits: [
+        {
+          Name: 'C',
+          Methods: [
+            {
+              Name: 'OnLookup',
+              Attributes: [{ Name: 'IntegrationEvent' }],
+              Parameters: [
+                { Name: 'No', TypeDefinition: { Name: 'Code', Length: 20 } },
+                { Name: 'Description', TypeDefinition: { Name: 'Text', Length: 50 } }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'No', typeText: 'Code[20]', isVar: false },
+      { name: 'Description', typeText: 'Text[50]', isVar: false }
+    ]);
+  });
+
+  test('Subtype name without spaces is rendered unquoted', () => {
+    const json = {
+      Codeunits: [
+        {
+          Name: 'C',
+          Methods: [
+            {
+              Name: 'OnE',
+              Attributes: [{ Name: 'IntegrationEvent' }],
+              Parameters: [
+                { Name: 'Cust', TypeDefinition: { Name: 'Record', Subtype: { Name: 'Customer' } } }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'Cust', typeText: 'Record Customer', isVar: false }
+    ]);
+  });
+
+  test('generic types via TypeArguments render as `Base of [Arg, ...]`', () => {
+    const json = {
+      Codeunits: [
+        {
+          Name: 'C',
+          Methods: [
+            {
+              Name: 'OnE',
+              Attributes: [{ Name: 'IntegrationEvent' }],
+              Parameters: [
+                {
+                  Name: 'Items',
+                  TypeDefinition: {
+                    Name: 'List',
+                    TypeArguments: [{ Name: 'Code', Length: 20 }]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'Items', typeText: 'List of [Code[20]]', isVar: false }
+    ]);
+  });
+
+  test('missing Parameters[] yields parameters: undefined (not []) — distinguishes "no signature info" from "no params"', () => {
+    const json = {
+      Codeunits: [
+        {
+          Name: 'C',
+          Methods: [
+            { Name: 'OnE', Attributes: [{ Name: 'IntegrationEvent' }] }
+          ]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.strictEqual(publishers[0].parameters, undefined);
+  });
+
+  test('empty Parameters[] yields parameters: []', () => {
+    const json = {
+      Codeunits: [
+        {
+          Name: 'C',
+          Methods: [
+            { Name: 'OnE', Attributes: [{ Name: 'IntegrationEvent' }], Parameters: [] }
+          ]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.deepStrictEqual(publishers[0].parameters, []);
+  });
+
+  test('malformed parameter entries are skipped silently', () => {
+    const json = {
+      Codeunits: [
+        {
+          Name: 'C',
+          Methods: [
+            {
+              Name: 'OnE',
+              Attributes: [{ Name: 'IntegrationEvent' }],
+              Parameters: [
+                'not an object',
+                { Name: 'OK', TypeDefinition: { Name: 'Boolean' } },
+                { Name: 'NoType' }, // missing TypeDefinition
+                { TypeDefinition: { Name: 'Boolean' } } // missing Name
+              ]
+            }
+          ]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'OK', typeText: 'Boolean', isVar: false }
+    ]);
+  });
+});

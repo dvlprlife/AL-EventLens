@@ -45,6 +45,23 @@ export interface ObjectRef {
   readonly appId?: string;
 }
 
+/**
+ * One parameter on an event publisher's procedure signature — captured so the
+ * panel detail pane can show subscribers what data the event exposes. Sourced
+ * from AL source for workspace publishers and from `SymbolReference.json`'s
+ * `Parameters[]` for `.alpackages/*.app` publishers. Synthesized trigger
+ * publishers carry no parameters (their signatures are implicit and vary by
+ * trigger).
+ */
+export interface Parameter {
+  /** Parameter name as declared. */
+  readonly name: string;
+  /** Type text in AL form, e.g. `Boolean`, `Integer`, `Code[20]`, `Record "Sales Header"`. */
+  readonly typeText: string;
+  /** True if declared with the `var` modifier. */
+  readonly isVar: boolean;
+}
+
 /** A discovered event publisher. */
 export interface Publisher {
   readonly owner: ObjectRef;
@@ -62,6 +79,13 @@ export interface Publisher {
    * accumulating duplicates.
    */
   readonly sourceUri?: vscode.Uri;
+  /**
+   * Procedure parameters, when known. Undefined for synthesized trigger
+   * publishers and for any publisher whose source couldn't be parsed (e.g.
+   * a malformed `Parameters[]` entry in `SymbolReference.json`). An empty
+   * array means "parsed and confirmed to take no parameters."
+   */
+  readonly parameters?: ReadonlyArray<Parameter>;
 }
 
 /** A discovered event subscriber. */

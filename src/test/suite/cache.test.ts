@@ -118,6 +118,58 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
       'v1 cache payloads must be treated as misses so the indexer re-parses and captures friendly-name metadata');
   });
 
+  test('old (v2) cache payloads are silently ignored on load — v3 added per-publisher parameters', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`);
+    // v2 shape: wrapper with schemaVersion: 2 and publishers lacking `parameters`.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 2,
+        publishers: [
+          { owner: { kind: 'codeunit', name: 'Old' }, eventName: 'OnLegacy', kind: 'integration' }
+        ],
+        name: 'Sample',
+        appPublisher: 'Acme'
+      }))
+    );
+    const result = await loadCachedSymbols(ctx, key);
+    assert.strictEqual(result, undefined,
+      'v2 cache payloads must be treated as misses so the indexer re-parses and captures signature parameters');
+  });
+
+  test('round-trip: publisher parameters survive store/load (v3)', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const pub: Publisher = {
+      owner: { kind: 'codeunit', name: 'Sales-Post', appId: 'X' },
+      eventName: 'OnAfterPost',
+      kind: 'integration',
+      parameters: [
+        { name: 'SalesHeader', typeText: 'Record "Sales Header"', isVar: true },
+        { name: 'CommitIsSuppressed', typeText: 'Boolean', isVar: false }
+      ]
+    };
+    await storeCachedSymbols(ctx, key, [pub]);
+    const loaded = await loadCachedSymbols(ctx, key);
+    assert.ok(loaded, 'cache must hit on round-trip');
+    assert.deepStrictEqual(loaded!.publishers[0].parameters, [
+      { name: 'SalesHeader', typeText: 'Record "Sales Header"', isVar: true },
+      { name: 'CommitIsSuppressed', typeText: 'Boolean', isVar: false }
+    ]);
+  });
+
+  test('round-trip: publisher with no parameters field round-trips without a `parameters` key', async () => {
+    // Distinguishes the "no signature info" case (undefined) from "no params"
+    // (empty array). Both are valid; the cache must preserve the distinction.
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    await storeCachedSymbols(ctx, key, [makePublisher('A', 'OnFoo')]);
+    const loaded = await loadCachedSymbols(ctx, key);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.publishers[0].parameters, undefined);
+  });
+
   test('mtime mismatch returns undefined', async () => {
     const stored: CacheKey = { appId: 'X', version: '1.0', mtime: 1000 };
     await storeCachedSymbols(ctx, stored, [makePublisher('A', 'OnFoo')]);

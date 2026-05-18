@@ -91,6 +91,115 @@ suite('al/parser: publishers', () => {
   });
 });
 
+suite('al/parser: publisher parameters', () => {
+  test('zero-arg procedure → empty parameters array', () => {
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterFoo()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.deepStrictEqual(publishers[0].parameters, []);
+  });
+
+  test('typical BC signature: var Record subtype + Boolean', () => {
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterPostSalesOrder(var SalesHeader: Record "Sales Header"; CommitIsSuppressed: Boolean)',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'SalesHeader', typeText: 'Record "Sales Header"', isVar: true },
+      { name: 'CommitIsSuppressed', typeText: 'Boolean', isVar: false }
+    ]);
+  });
+
+  test('multi-line parameter list', () => {
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterPostSalesOrder(',
+      '        var SalesHeader: Record "Sales Header";',
+      '        var SalesInvoiceHeader: Record "Sales Invoice Header";',
+      '        CommitIsSuppressed: Boolean',
+      '    )',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers[0].parameters!.length, 3);
+    assert.deepStrictEqual(publishers[0].parameters![0], {
+      name: 'SalesHeader', typeText: 'Record "Sales Header"', isVar: true
+    });
+    assert.deepStrictEqual(publishers[0].parameters![2], {
+      name: 'CommitIsSuppressed', typeText: 'Boolean', isVar: false
+    });
+  });
+
+  test('length-bound types: Code[20] and Text[50]', () => {
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnLookup(No: Code[20]; Description: Text[50])',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'No', typeText: 'Code[20]', isVar: false },
+      { name: 'Description', typeText: 'Text[50]', isVar: false }
+    ]);
+  });
+
+  test('quoted parameter name is unquoted; brackets in type do not split params', () => {
+    // `;` inside a `Dictionary of [Code[20]; Text]` type expression must not
+    // be treated as a parameter separator. Also exercises a quoted name.
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnEvt("My Param": Dictionary of [Code[20]; Text]; Flag: Boolean)',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'My Param', typeText: 'Dictionary of [Code[20]; Text]', isVar: false },
+      { name: 'Flag', typeText: 'Boolean', isVar: false }
+    ]);
+  });
+
+  test('return type after parameters does not bleed into the last param', () => {
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure GetSomething(Id: Integer): Code[20]',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'Id', typeText: 'Integer', isVar: false }
+    ]);
+  });
+});
+
 suite('al/parser: subscribers', () => {
   test('pre-BC22 syntax (string-literal target name and quoted event)', () => {
     const src = [

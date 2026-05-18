@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { EventKind, ObjectKind, ObjectRef, Publisher, Subscriber } from './types';
+import type { EventKind, ObjectKind, ObjectRef, Parameter, Publisher, Subscriber } from './types';
 
 const OBJECT_KINDS: ReadonlyArray<ObjectKind> = [
   'codeunit', 'table', 'tableextension', 'page', 'pageextension',
@@ -57,7 +57,8 @@ export function parseAl(
       owner: ownerForLine(proc.line),
       eventName: stripQuotes(proc.name),
       kind,
-      location: new vscode.Location(uri, new vscode.Position(proc.line, proc.col))
+      location: new vscode.Location(uri, new vscode.Position(proc.line, proc.col)),
+      parameters: proc.parameters
     });
   }
 
@@ -137,6 +138,7 @@ interface ProcedureSite {
   readonly line: number;
   readonly col: number;
   readonly name: string;
+  readonly parameters: ReadonlyArray<Parameter>;
 }
 
 function findProcedureAfter(text: string, fromIdx: number): ProcedureSite | undefined {
@@ -156,7 +158,115 @@ function findProcedureAfter(text: string, fromIdx: number): ProcedureSite | unde
     : 0;
   const nameAbs = absMatchStart + nameStartInMatch;
   const { line, col } = absToLineCol(text, nameAbs);
-  return { line, col, name: m[1] };
+
+  // Locate the parameter list `(...)` immediately after the procedure name
+  // and parse it. The name regex matched a single token, so the open paren
+  // is the next non-whitespace character starting from the end of m[0].
+  const afterMatchAbs = absMatchStart + m[0].length;
+  const parameters = parseParameterListAt(text, afterMatchAbs);
+
+  return { line, col, name: m[1], parameters };
+}
+
+/**
+ * Starting at `fromIdx`, skip whitespace, expect `(`, then collect the
+ * balanced contents through the matching `)` and parse them into a parameter
+ * list. Returns `[]` for `()`, and `[]` (as a soft fallback) if no opening
+ * paren is found within a few characters — pathological AL that lacks a
+ * parameter list at all shouldn't crash parsing.
+ */
+function parseParameterListAt(text: string, fromIdx: number): ReadonlyArray<Parameter> {
+  let i = fromIdx;
+  while (i < text.length && /\s/.test(text[i])) {
+    i++;
+  }
+  if (text[i] !== '(') {
+    return [];
+  }
+  // Scan forward to the matching close paren, ignoring nested parens that
+  // can appear inside type expressions like `Dictionary of [Code[20], Text]`
+  // even though AL parameter lists rarely nest deeply. Strings inside AL
+  // identifiers are quoted with `"…"` and cannot contain literal parens, so
+  // a simple depth counter is sufficient.
+  let depth = 0;
+  const start = i + 1;
+  let end = -1;
+  for (let j = i; j < text.length; j++) {
+    const ch = text[j];
+    if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      depth--;
+      if (depth === 0) {
+        end = j;
+        break;
+      }
+    }
+  }
+  if (end < 0) {
+    return [];
+  }
+  const inner = text.slice(start, end).trim();
+  if (!inner) {
+    return [];
+  }
+  return splitParameterList(inner)
+    .map(parseOneParameter)
+    .filter((p): p is Parameter => p !== undefined);
+}
+
+/**
+ * Split a parameter list body by `;` at the **top level only** — `;` inside
+ * brackets (e.g. `Dictionary of [Code[20]; Text]`) is part of a type
+ * expression and must not be treated as a separator.
+ */
+function splitParameterList(inner: string): string[] {
+  const parts: string[] = [];
+  let depthBracket = 0;
+  let depthParen = 0;
+  let last = 0;
+  for (let i = 0; i < inner.length; i++) {
+    const ch = inner[i];
+    if (ch === '[') {
+      depthBracket++;
+    } else if (ch === ']') {
+      depthBracket--;
+    } else if (ch === '(') {
+      depthParen++;
+    } else if (ch === ')') {
+      depthParen--;
+    } else if (ch === ';' && depthBracket === 0 && depthParen === 0) {
+      parts.push(inner.slice(last, i));
+      last = i + 1;
+    }
+  }
+  parts.push(inner.slice(last));
+  return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+}
+
+/**
+ * Parse one AL parameter declaration of the form `[var ] Name : Type`. The
+ * `Type` portion is preserved verbatim (whitespace trimmed) — collapsing it
+ * into a richer model isn't necessary for display.
+ */
+function parseOneParameter(raw: string): Parameter | undefined {
+  let s = raw.trim();
+  let isVar = false;
+  const varMatch = /^var\s+/i.exec(s);
+  if (varMatch) {
+    isVar = true;
+    s = s.slice(varMatch[0].length);
+  }
+  const colonIdx = s.indexOf(':');
+  if (colonIdx < 0) {
+    return undefined;
+  }
+  const nameRaw = s.slice(0, colonIdx).trim();
+  const typeText = s.slice(colonIdx + 1).trim();
+  if (!nameRaw || !typeText) {
+    return undefined;
+  }
+  return { name: stripQuotes(nameRaw), typeText, isVar };
 }
 
 function absToLineCol(text: string, idx: number): { line: number; col: number } {
