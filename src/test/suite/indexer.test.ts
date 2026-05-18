@@ -455,6 +455,53 @@ suite('index/indexer: buildIndex', () => {
     assert.strictEqual(appTriggers.length, 10, 'app Item must contribute exactly 10 triggers (intra-app dedup)');
   });
 
+  test('regression: a bundled-source publisher matching SymbolReference does not duplicate', async () => {
+    // An .app whose SymbolReference.json declares one IntegrationEvent
+    // (`OnAppEvent` on `AppCodeunit`) AND ships the same publisher in
+    // bundled source. Pre-fix the indexer pushed publishers from both
+    // sources, so every event under any .app with bundled source
+    // (Microsoft BaseApp, Business Foundation, …) showed up twice in
+    // the panel. Post-fix bundled source contributes subscribers only.
+    const bundledAppCodeunitAl = [
+      'codeunit 60000 AppCodeunit',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAppEvent()',
+      '    begin',
+      '    end;',
+      '',
+      '    [EventSubscriber(ObjectType::Codeunit, Codeunit::AppCodeunit, OnAppEvent, \'\', false, false)]',
+      '    procedure HandleAppEvent()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes({
+      bundledFiles: { 'src/AppCodeunit.al': bundledAppCodeunitAl }
+    });
+    const fs: FakeFs = {
+      bytes: new Map([[appUri.toString(), appBytes]])
+    };
+    applyPatches({
+      alFiles: [],
+      appFiles: [appUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const onAppEvent = idx.publishers.filter((p) => p.eventName === 'OnAppEvent');
+    assert.strictEqual(onAppEvent.length, 1,
+      `expected exactly one OnAppEvent publisher (SymbolReference is authoritative), got ${onAppEvent.length}`);
+    // Subscriber from bundled source must still be picked up.
+    assert.strictEqual(idx.subscribers.length, 1, 'bundled-source subscriber must still be collected');
+    assert.strictEqual(idx.subscribers[0].targetEvent, 'OnAppEvent');
+    assert.strictEqual(idx.subscribers[0].resolved, true,
+      'subscriber must resolve against the single SymbolReference-derived publisher');
+  });
+
   test('includeTriggerEvents: false skips trigger synthesis entirely', async () => {
     const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
     const tableUri = vscode.Uri.parse('file:///workspace/MyTable.al');

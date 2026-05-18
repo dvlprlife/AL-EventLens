@@ -92,13 +92,16 @@ export async function buildIndex(
           appMeta.set(app.appId, { appId: app.appId, name: appName, appPublisher });
         }
         publishers.push(...appPublishers);
-        // Subscribers from bundled sources are NOT cached; bundled-source
-        // subscribers must be re-parsed every run since they carry
-        // `vscode.Location` references that aren't JSON-safe.
+        // Bundled sources are parsed only for subscribers and trigger
+        // owners. Publishers from bundled source are deliberately NOT
+        // pushed — `parseSymbolReference` above is authoritative for
+        // publishers (per CLAUDE.md), and pushing both would duplicate
+        // every event under any `.app` that ships its own `src/*.al`.
+        // Subscriber-side data is not cached because `vscode.Location`
+        // is not JSON-safe.
         for (const src of app.bundledAlSources) {
           const srcUri = vscode.Uri.parse(`al-eventlens-app:/${app.appId}/${src.path}`);
           const parsed = parseAl(srcUri, src.text);
-          publishers.push(...parsed.publishers);
           subscribers.push(...parsed.subscribers);
           if (includeTriggerEvents) {
             collectTriggerOwners(src.text, triggerOwners, app.appId);
