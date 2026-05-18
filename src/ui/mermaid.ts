@@ -1,25 +1,5 @@
-import type { ObjectKind, Publisher, Subscriber } from '../al/types';
-
-/** Same label-casing as `treeView.ts`'s `formatKind`. Kept inline because the
- *  table is small and the only other consumer (the tree) lives in a peer
- *  module — promoting to a shared helper waits for the third caller. */
-function formatKind(kind: ObjectKind): string {
-  switch (kind) {
-    case 'codeunit':         return 'Codeunit';
-    case 'table':            return 'Table';
-    case 'tableextension':   return 'TableExtension';
-    case 'page':             return 'Page';
-    case 'pageextension':    return 'PageExtension';
-    case 'report':           return 'Report';
-    case 'reportextension':  return 'ReportExtension';
-    case 'query':            return 'Query';
-    case 'xmlport':          return 'XmlPort';
-    case 'enum':             return 'Enum';
-    case 'enumextension':    return 'EnumExtension';
-    case 'permissionset':    return 'PermissionSet';
-    case 'interface':        return 'Interface';
-  }
-}
+import { formatKind } from '../al/format';
+import type { Publisher, Subscriber } from '../al/types';
 
 /** Mermaid-safe label fragment. Inside `["..."]`, only `"` and newlines need
  *  escaping for the AL identifier shapes we emit. */

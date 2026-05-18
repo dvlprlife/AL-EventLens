@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { formatKind } from '../al/format';
 import type { AppMeta, ObjectKind, Publisher } from '../al/types';
 import { countSubscribersByPublisherKey, publisherKey } from '../index/match';
 import { EventIndexStore } from '../index/store';
@@ -53,25 +54,6 @@ export type TreeNode = AppNode | KindNode | ObjectNode | EventNode | EmptyNode;
 // ─── Helpers ────────────────────────────────────────────────────────────
 
 const WORKSPACE_BUCKET = '(workspace)';
-
-/** AL kind label-cased for display (`Codeunit`, `TableExtension`, ...). */
-function formatKind(kind: ObjectKind): string {
-  switch (kind) {
-    case 'codeunit':         return 'Codeunit';
-    case 'table':            return 'Table';
-    case 'tableextension':   return 'TableExtension';
-    case 'page':             return 'Page';
-    case 'pageextension':    return 'PageExtension';
-    case 'report':           return 'Report';
-    case 'reportextension':  return 'ReportExtension';
-    case 'query':            return 'Query';
-    case 'xmlport':          return 'XmlPort';
-    case 'enum':             return 'Enum';
-    case 'enumextension':    return 'EnumExtension';
-    case 'permissionset':    return 'PermissionSet';
-    case 'interface':        return 'Interface';
-  }
-}
 
 /** Codicon id for a given AL object kind. Drawn from the standard
  *  vscode.ThemeIcon set so it themes automatically — no extra assets. */
