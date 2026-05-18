@@ -42,14 +42,16 @@ export function openPanel(context: vscode.ExtensionContext, store: EventIndexSto
   void panel.webview.postMessage({
     type: 'index',
     publishers: initial.publishers,
-    subscribers: initial.subscribers
+    subscribers: initial.subscribers,
+    appMeta: Array.from(initial.appMeta.entries())
   });
 
   storeListener = store.onDidChange((idx) => {
     void panel.webview.postMessage({
       type: 'index',
       publishers: idx.publishers,
-      subscribers: idx.subscribers
+      subscribers: idx.subscribers,
+      appMeta: Array.from(idx.appMeta.entries())
     });
   });
 
