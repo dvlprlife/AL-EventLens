@@ -103,15 +103,17 @@ export function postSelectToPanel(publisher: Publisher): void {
 /**
  * Post a `{type:'reveal', search, selectKey?}` message to the active panel,
  * if any. Used to drive the panel from external triggers (tree-view clicks,
- * CodeLens) — sets the search box to apply an object filter, then optionally
- * selects the supplied publisher inside the filtered view.
+ * CodeLens) — sets the search box to an AL-style identity selector
+ * (`Codeunit::"Sales-Post"`) so the panel filters to just the supplied
+ * object's events, then optionally selects the supplied publisher inside
+ * the filtered view.
  *
- * `appKey` is matched in the panel against either the friendly app name or
- * the `appId` GUID, so callers can pass whichever is convenient (the GUID is
- * safer because it's stable across renames).
+ * The owning app is intentionally NOT part of the filter — same-named
+ * objects across multiple apps (e.g. BaseApp + an extension) surface
+ * together rather than fragmenting into per-app filtered views.
  */
 export function postRevealObjectToPanel(
-  owner: Pick<ObjectRef, 'appId' | 'kind' | 'name'>,
+  owner: Pick<ObjectRef, 'kind' | 'name'>,
   selectPublisher?: Publisher
 ): void {
   if (!activePanel) {
@@ -125,21 +127,15 @@ export function postRevealObjectToPanel(
   void activePanel.webview.postMessage({ type: 'reveal', search, selectKey });
 }
 
-function buildObjectSearch(owner: Pick<ObjectRef, 'appId' | 'kind' | 'name'>): string {
-  const parts: string[] = [];
-  // Workspace publishers have no appId; the panel recognizes the special
-  // `app:(workspace)` token for those.
-  parts.push(owner.appId ? `app:${quoteIfNeeded(owner.appId)}` : 'app:(workspace)');
-  parts.push(`kind:${owner.kind}`);
-  parts.push(`object:${quoteIfNeeded(owner.name)}`);
-  return parts.join(' ');
-}
-
-function quoteIfNeeded(value: string): string {
-  if (/[\s"]/.test(value)) {
-    return `"${value.replace(/"/g, '')}"`;
-  }
-  return value;
+function buildObjectSearch(owner: Pick<ObjectRef, 'kind' | 'name'>): string {
+  // AL-style identity selector — e.g. `Codeunit::"Sales-Post"`. The kind is
+  // implicit in the selector, and the appId is intentionally omitted so the
+  // same object name spotted across multiple apps (BaseApp + an extension)
+  // surfaces together rather than splitting into separate filtered views.
+  const namePart = /[\s"]/.test(owner.name)
+    ? `"${owner.name.replace(/"/g, '')}"`
+    : owner.name;
+  return `${owner.kind}::${namePart}`;
 }
 
 /**
