@@ -239,4 +239,31 @@ suite('index/store: EventIndexStore', () => {
     store.set({ publishers: [], subscribers: [], appMeta: new Map() });
     assert.strictEqual(fired, 0, 'listener should not fire after dispose');
   });
+
+  test('isInitialized: false until the first set, then true (and stays true through subsequent sets)', () => {
+    const store = new EventIndexStore();
+    try {
+      assert.strictEqual(store.isInitialized, false,
+        'a fresh store must report uninitialized so the tree shows the indexing placeholder');
+      store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+      assert.strictEqual(store.isInitialized, true,
+        'set must flip isInitialized — even when the index it received is empty');
+      store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+      assert.strictEqual(store.isInitialized, true,
+        'isInitialized never flips back');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('isInitialized: also flips on updateFile (in case incremental save fires before any full pass)', () => {
+    const store = new EventIndexStore();
+    try {
+      assert.strictEqual(store.isInitialized, false);
+      store.updateFile(vscode.Uri.parse('file:///x.al'), [], []);
+      assert.strictEqual(store.isInitialized, true);
+    } finally {
+      store.dispose();
+    }
+  });
 });

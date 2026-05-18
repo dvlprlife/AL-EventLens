@@ -46,12 +46,21 @@ interface EventNode {
   readonly subscriberCount: number;
 }
 
-/** Placeholder shown only when the store is fully empty. */
+/** Placeholder shown only when the store is fully empty AFTER initial
+ *  indexing has resolved. */
 interface EmptyNode {
   readonly kind: 'empty';
 }
 
-export type TreeNode = AppNode | KindNode | ObjectNode | EventNode | EmptyNode;
+/** Placeholder shown while the initial full-pass index is still running.
+ *  Distinguishes "indexing hasn't finished yet" from "indexed and empty"
+ *  so the tree doesn't suggest `AL EventLens: Refresh Index` while the
+ *  status bar is already reporting progress on the first scan. */
+interface IndexingNode {
+  readonly kind: 'indexing';
+}
+
+export type TreeNode = AppNode | KindNode | ObjectNode | EventNode | EmptyNode | IndexingNode;
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
@@ -213,6 +222,16 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
   }
 
   public getTreeItem(node: TreeNode): vscode.TreeItem {
+    if (node.kind === 'indexing') {
+      const item = new vscode.TreeItem(
+        'Indexing workspace…',
+        vscode.TreeItemCollapsibleState.None
+      );
+      // `sync~spin` is VS Code's spinning sync codicon — matches the
+      // status-bar progress indicator that's running in parallel.
+      item.iconPath = new vscode.ThemeIcon('sync~spin');
+      return item;
+    }
     if (node.kind === 'empty') {
       const item = new vscode.TreeItem(
         'No publishers indexed yet — try `AL EventLens: Refresh Index`',
@@ -272,7 +291,7 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
 
     if (!node) {
       if (index.publishers.length === 0) {
-        return [{ kind: 'empty' }];
+        return [{ kind: this.store.isInitialized ? 'empty' : 'indexing' }];
       }
       return groupByApp(index.publishers, index.appMeta);
     }

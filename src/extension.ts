@@ -76,12 +76,18 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Fire-and-forget initial index. The result populates the store so the
   // panel, tree, and CodeLens surfaces can render once it completes.
+  // On failure, still mark the store initialized (with an empty index) so
+  // the tree's `indexing…` placeholder progresses to the real empty-state
+  // message rather than spinning forever.
   indexWithProgress()
     .then((idx) => {
       store.set(idx);
       console.log(`AL EventLens: indexed ${idx.publishers.length} publishers, ${idx.subscribers.length} subscribers`);
     })
-    .catch((err) => console.error('AL EventLens: indexing failed', err));
+    .catch((err) => {
+      console.error('AL EventLens: indexing failed', err);
+      store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+    });
 }
 
 export function deactivate(): void {
