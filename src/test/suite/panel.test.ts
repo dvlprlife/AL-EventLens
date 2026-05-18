@@ -148,6 +148,16 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     assert.ok(!/<link\b/i.test(html), 'no external stylesheets');
     assert.ok(!/<script\b[^>]*\bsrc=/i.test(html), 'no external scripts');
   });
+
+  test('embeds the .detail-signature CSS class and the renderSignature helper for the parameter line', () => {
+    const html = renderPanelHtml('nonce123');
+    assert.ok(html.includes('.detail-signature'),
+      '.detail-signature CSS rule must be present so the param line is themed');
+    assert.ok(html.includes('function renderSignature(params)'),
+      'renderSignature helper must be inlined for the webview to call it');
+    assert.ok(/sig\.className\s*=\s*['"]detail-signature['"]/.test(html),
+      'renderDetail must instantiate a <div class="detail-signature"> when the publisher has parameters');
+  });
 });
 
 suite('ui/panel: openPanel singleton + store wiring', () => {

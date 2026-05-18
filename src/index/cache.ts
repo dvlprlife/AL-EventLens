@@ -20,12 +20,13 @@ export interface CachedAppData {
 const SYMBOLS_DIR = 'symbols';
 
 /** Bump whenever the on-disk shape changes. v2 added `name` / `appPublisher`
- *  alongside the previously-bare publisher array. Older entries (v1, which
- *  was a top-level array) are silently treated as cache misses. */
-const SCHEMA_VERSION = 2;
+ *  alongside the previously-bare publisher array. v3 added per-publisher
+ *  `parameters` (procedure signature) so the panel can render them without a
+ *  re-parse. Older entries are silently treated as cache misses. */
+const SCHEMA_VERSION = 3;
 
-interface CachedPayloadV2 {
-  readonly schemaVersion: 2;
+interface CachedPayloadV3 {
+  readonly schemaVersion: 3;
   readonly publishers: Publisher[];
   readonly name?: string;
   readonly appPublisher?: string;
@@ -94,7 +95,7 @@ export async function loadCachedSymbols(
   ) {
     return undefined;
   }
-  const payload = parsed as CachedPayloadV2;
+  const payload = parsed as CachedPayloadV3;
   // Cached records intentionally have no `vscode.Location` — see
   // storeCachedSymbols. Cast is safe because every consumer treats
   // `Publisher.location` as optional.
@@ -158,8 +159,13 @@ export async function storeCachedSymbols(
     // readDirectory failed for a reason other than missing-dir; skip cleanup.
   }
 
-  const strippedPublishers = publishers.map(({ owner, eventName, kind }) => ({ owner, eventName, kind }));
-  const payload: CachedPayloadV2 = {
+  const strippedPublishers = publishers.map(({ owner, eventName, kind, parameters }) => ({
+    owner,
+    eventName,
+    kind,
+    ...(parameters !== undefined ? { parameters } : {})
+  }));
+  const payload: CachedPayloadV3 = {
     schemaVersion: SCHEMA_VERSION,
     publishers: strippedPublishers as Publisher[],
     name: meta?.name,

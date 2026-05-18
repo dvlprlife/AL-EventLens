@@ -1,4 +1,4 @@
-import type { EventKind, ObjectKind, Publisher } from '../al/types';
+import type { EventKind, ObjectKind, Parameter, Publisher } from '../al/types';
 
 const CONTAINER_KINDS: ReadonlyArray<readonly [string, ObjectKind]> = [
   ['Codeunits', 'codeunit'],
@@ -82,9 +82,80 @@ function collectFromObject(
       owner: { kind: ownerKind, id, name, appId },
       eventName: method.Name,
       kind,
-      location: undefined
+      location: undefined,
+      parameters: extractParameters(method.Parameters)
     });
   }
+}
+
+/**
+ * Convert `SymbolReference.json` `Parameters[]` into `Parameter` records. The
+ * shape mirrors AL: each entry has `Name`, optional `IsVar`, and a
+ * `TypeDefinition` that describes the type. Unknown / malformed entries are
+ * skipped silently — surfacing them as errors would force the indexer to
+ * abort an otherwise-usable package over cosmetic data.
+ */
+function extractParameters(raw: unknown): ReadonlyArray<Parameter> | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  const out: Parameter[] = [];
+  for (const p of raw) {
+    if (!isPlainObject(p) || typeof p.Name !== 'string') {
+      continue;
+    }
+    const typeText = renderTypeDefinition(p.TypeDefinition);
+    if (!typeText) {
+      continue;
+    }
+    out.push({
+      name: p.Name,
+      typeText,
+      isVar: p.IsVar === true
+    });
+  }
+  return out;
+}
+
+/**
+ * Render a `SymbolReference.json` `TypeDefinition` as AL source text. Handles
+ * the common shapes seen in BC symbols:
+ *
+ *  - Bare scalars: `{ Name: 'Boolean' }` → `Boolean`
+ *  - Length-bound text: `{ Name: 'Code', Length: 20 }` → `Code[20]`
+ *  - Subtyped scalars: `{ Name: 'Record', Subtype: { Name: 'Sales Header' } }` → `Record "Sales Header"`
+ *    Names without spaces are emitted unquoted; names with spaces or special
+ *    characters round-trip through `"…"` so the displayed signature is valid
+ *    AL syntax.
+ *  - Generics: `{ Name: 'List', TypeArguments: [...] }` → `List of [Code[20]]`
+ *
+ * Falls back to the bare `Name` for shapes we don't recognize. Returns
+ * `undefined` only if the input isn't an object at all.
+ */
+function renderTypeDefinition(td: unknown): string | undefined {
+  if (!isPlainObject(td) || typeof td.Name !== 'string') {
+    return undefined;
+  }
+  const base = td.Name;
+  if (typeof td.Length === 'number' && td.Length > 0) {
+    return `${base}[${td.Length}]`;
+  }
+  if (isPlainObject(td.Subtype) && typeof td.Subtype.Name === 'string') {
+    return `${base} ${quoteIfNeeded(td.Subtype.Name)}`;
+  }
+  if (Array.isArray(td.TypeArguments) && td.TypeArguments.length > 0) {
+    const args = td.TypeArguments
+      .map((t) => renderTypeDefinition(t))
+      .filter((s): s is string => typeof s === 'string');
+    if (args.length > 0) {
+      return `${base} of [${args.join(', ')}]`;
+    }
+  }
+  return base;
+}
+
+function quoteIfNeeded(name: string): string {
+  return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name) ? name : `"${name}"`;
 }
 
 function eventKindFor(method: unknown): EventKind | undefined {
