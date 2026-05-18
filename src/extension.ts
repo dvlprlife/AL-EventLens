@@ -58,11 +58,15 @@ export function activate(context: vscode.ExtensionContext): void {
     }
     const matches = findSubscribersFor(publisher, store.get().subscribers);
     const mermaid = renderMermaid(publisher, matches);
-    void vscode.env.clipboard.writeText(mermaid).then(() => {
-      void vscode.window.showInformationMessage(
+    void vscode.env.clipboard.writeText(mermaid).then(
+      () => vscode.window.showInformationMessage(
         `AL EventLens: copied ${matches.length} subscriber${matches.length === 1 ? '' : 's'} to clipboard as Mermaid.`
-      );
-    });
+      ),
+      (err) => {
+        console.error('AL EventLens: clipboard write failed', err);
+        void vscode.window.showErrorMessage('AL EventLens: clipboard write failed; see Extension Host log.');
+      }
+    );
   });
 
   context.subscriptions.push(registerTreeView(context, store));
