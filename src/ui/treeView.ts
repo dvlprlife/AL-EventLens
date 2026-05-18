@@ -299,11 +299,7 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
  * `TreeView` itself plus the store subscription, so a single
  * `context.subscriptions.push(...)` cleans up both on extension shutdown.
  */
-export function registerTreeView(
-  context: vscode.ExtensionContext,
-  store: EventIndexStore
-): vscode.Disposable {
-  void context;
+export function registerTreeView(store: EventIndexStore): vscode.Disposable {
   const provider = new EventTreeDataProvider(store);
   const view = vscode.window.createTreeView('alEventLensView', { treeDataProvider: provider });
   const sub = store.onDidChange(() => provider.refresh());

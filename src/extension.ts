@@ -62,7 +62,7 @@ export function activate(context: vscode.ExtensionContext): void {
     void runExportMermaid(publisher, store);
   });
 
-  context.subscriptions.push(registerTreeView(context, store));
+  context.subscriptions.push(registerTreeView(store));
   context.subscriptions.push(registerCodeLens(context, store));
   context.subscriptions.push(registerSaveWatcher(context, store));
 
