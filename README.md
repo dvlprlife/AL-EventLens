@@ -6,7 +6,7 @@ AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscri
 
 ## Demo
 
-_Demo GIFs and screenshots will be added once the first UI surface ships._
+_Demo GIFs and screenshots coming soon._
 
 ## Features
 
@@ -14,10 +14,12 @@ _Demo GIFs and screenshots will be added once the first UI surface ships._
 - **Resolved subscriber → publisher links** — Each subscriber is matched against its target publisher and marked **resolved** or **unresolved**. Unresolved subscribers usually mean the target app is missing from `.alpackages`; resolved ones are click-jumpable.
 - **Trigger events as first-class publishers** — Implicit table and page trigger events (`OnAfterDeleteEvent`, `OnBeforeValidateEvent`, …) are synthesized as virtual publishers so subscribers to them resolve cleanly.
 - **Searchable webview panel** — Publisher list with per-row subscriber count and hover tooltips; click a publisher to see all subscribers in a detail pane with resolved (`✓`) / unresolved (`⚠`) badges, file path, and line number; click a subscriber to jump to its source. The two-pane divider is draggable (double-click to reset).
+- **Panel filters** — App and Kind dropdowns above the publisher list narrow the view to one source app or one AL object kind. The search box accepts `app:<id-or-name>` and `kind:<kind>` prefixes as a power-user shortcut for the same filters (e.g. `kind:codeunit OnAfterPost`).
 - **Activity-bar view** — A dedicated `AL EventLens` view drills four levels: source app (friendly `Name` + vendor from `NavxManifest.xml`, GUID fallback when missing) → AL object kind → object → event. Intermediate rows show `(events / subscribers)` counts so a busy subtree is obvious at a glance; every row has a codicon so the level reads without reading labels.
 - **CodeLens** — Live subscriber-count CodeLens above each `[IntegrationEvent]` and `[BusinessEvent]` declaration. Click it to open the panel scoped to that publisher.
 - **Mermaid export** — One command renders the current publisher's subscriber set as a Mermaid diagram for docs or design reviews.
 - **Incremental re-index on save** — Saved AL files re-parse just the touched objects; the rest of the index stays warm.
+- **Indexing progress in the status bar** — The initial workspace scan reports per-phase progress (scanning AL files, scanning `.alpackages`, per-package reads, synthesizing triggers, resolving subscriber links) in the status bar, so large workspaces never look frozen during startup.
 - **Persistent cache** — Parsed `.app` results are cached in extension global storage, keyed by `(appId, version, mtime)`, so re-opening a workspace is near-instant.
 - **VS Code Web ready** — All file access goes through `vscode.workspace.fs`, so the extension runs on `vscode.dev` and `github.dev` as well as desktop.
 
