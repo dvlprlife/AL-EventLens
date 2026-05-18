@@ -532,4 +532,87 @@ suite('index/indexer: buildIndex', () => {
       'parser must NOT have run — OnAppEvent (the parser output) should be absent'
     );
   });
+
+  test('progress.report fires the expected phase sequence on a cache-miss workspace + .app run', async () => {
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes();
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appUri.toString(), appBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      fs
+    });
+
+    const messages: string[] = [];
+    const fakeProgress: vscode.Progress<{ message?: string; increment?: number }> = {
+      report: (value) => {
+        if (typeof value.message === 'string') {
+          messages.push(value.message);
+        }
+      }
+    };
+
+    await buildIndex(fakeContext(), fakeProgress);
+
+    assert.deepStrictEqual(messages, [
+      'Scanning workspace AL files',
+      'Scanning .alpackages (1 package)',
+      'Reading Sample',
+      'Synthesizing trigger publishers',
+      'Resolving subscriber links'
+    ], `unexpected progress sequence: ${JSON.stringify(messages)}`);
+  });
+
+  test('progress.report skips the per-package "Reading ..." message on a cache hit', async () => {
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes();
+    const fs: FakeFs = {
+      bytes: new Map([[appUri.toString(), appBytes]])
+    };
+    const ctx = fakeContext();
+    const FIXED_MTIME = 4242;
+    const APP_ID = '11111111-1111-1111-1111-111111111111';
+    const APP_VERSION = '1.0.0.0';
+
+    const key: CacheKey = { appId: APP_ID, version: APP_VERSION, mtime: FIXED_MTIME };
+    await storeCachedSymbols(ctx, key, [
+      {
+        owner: { kind: 'codeunit', name: 'CACHED_MARKER', appId: APP_ID },
+        eventName: 'OnCachedMarker',
+        kind: 'integration'
+      }
+    ]);
+
+    applyPatches({
+      alFiles: [],
+      appFiles: [appUri],
+      fs,
+      mtime: FIXED_MTIME,
+      includeTriggerEvents: false
+    });
+
+    const messages: string[] = [];
+    const fakeProgress: vscode.Progress<{ message?: string; increment?: number }> = {
+      report: (value) => {
+        if (typeof value.message === 'string') {
+          messages.push(value.message);
+        }
+      }
+    };
+
+    await buildIndex(ctx, fakeProgress);
+
+    // Cache hit → no "Reading Sample" message. Trigger phase also skipped (includeTriggerEvents=false).
+    assert.deepStrictEqual(messages, [
+      'Scanning workspace AL files',
+      'Scanning .alpackages (1 package)',
+      'Resolving subscriber links'
+    ], `unexpected progress sequence on cache hit: ${JSON.stringify(messages)}`);
+  });
 });
