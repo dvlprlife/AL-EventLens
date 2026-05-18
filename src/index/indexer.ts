@@ -29,7 +29,10 @@ export interface EventIndex {
  * logged via `console.warn` so a single corrupted package never aborts
  * the whole index.
  */
-export async function buildIndex(context: vscode.ExtensionContext): Promise<EventIndex> {
+export async function buildIndex(
+  context: vscode.ExtensionContext,
+  progress?: vscode.Progress<{ message?: string; increment?: number }>
+): Promise<EventIndex> {
   const cfg = vscode.workspace.getConfiguration('alEventLens');
   const scanAlpackages = cfg.get<boolean>('scanAlpackages', true);
   const includeTriggerEvents = cfg.get<boolean>('includeTriggerEvents', true);
@@ -46,6 +49,7 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
   const decoder = new TextDecoder('utf-8');
 
   // Pass 1: workspace AL source files.
+  progress?.report({ message: 'Scanning workspace AL files' });
   const alUris = await vscode.workspace.findFiles('**/*.al', '**/node_modules/**');
   for (const uri of alUris) {
     const bytes = await vscode.workspace.fs.readFile(uri);
@@ -61,6 +65,9 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
   // Pass 2: .alpackages/*.app dependency packages.
   if (scanAlpackages) {
     const appUris = await vscode.workspace.findFiles('**/.alpackages/*.app');
+    progress?.report({
+      message: `Scanning .alpackages (${appUris.length} package${appUris.length === 1 ? '' : 's'})`
+    });
     for (const uri of appUris) {
       try {
         const stat = await vscode.workspace.fs.stat(uri);
@@ -75,6 +82,7 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
           appName = cached.name;
           appPublisher = cached.appPublisher;
         } else {
+          progress?.report({ message: `Reading ${app.name ?? app.appId}` });
           appPublishers = parseSymbolReference(app.symbolReferenceJson, app.appId);
           appName = app.name;
           appPublisher = app.appPublisher;
@@ -104,11 +112,13 @@ export async function buildIndex(context: vscode.ExtensionContext): Promise<Even
   }
 
   if (includeTriggerEvents) {
+    progress?.report({ message: 'Synthesizing trigger publishers' });
     for (const owner of triggerOwners.values()) {
       publishers.push(...synthesizeTriggerPublishers(owner));
     }
   }
 
+  progress?.report({ message: 'Resolving subscriber links' });
   const resolved = resolveSubscribers(publishers, subscribers);
   return { publishers, subscribers: resolved, appMeta };
 }

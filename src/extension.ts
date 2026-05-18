@@ -17,15 +17,15 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(vscode.commands.registerCommand(command, handler));
   };
 
-  const indexWithProgress = async (title: string): Promise<Awaited<ReturnType<typeof buildIndex>>> =>
+  const indexWithProgress = async (): Promise<Awaited<ReturnType<typeof buildIndex>>> =>
     vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Window, title: `AL EventLens: ${title}` },
-      async () => buildIndex(context)
+      { location: vscode.ProgressLocation.Window, title: 'AL EventLens' },
+      async (progress) => buildIndex(context, progress)
     );
 
   register('alEventLens.openPanel',       () => openPanel(context, store));
   register('alEventLens.refresh',         () => {
-    indexWithProgress('refreshing index')
+    indexWithProgress()
       .then((idx) => store.set(idx))
       .catch((err) => console.error('AL EventLens: refresh failed', err));
   });
@@ -71,7 +71,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   // Fire-and-forget initial index. The result populates the store so the
   // panel, tree, and CodeLens surfaces can render once it completes.
-  indexWithProgress('indexing')
+  indexWithProgress()
     .then((idx) => {
       store.set(idx);
       console.log(`AL EventLens: indexed ${idx.publishers.length} publishers, ${idx.subscribers.length} subscribers`);
