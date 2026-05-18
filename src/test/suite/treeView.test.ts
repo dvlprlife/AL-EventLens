@@ -366,7 +366,7 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     }
   });
 
-  test('KindNode and ObjectNode TreeItems carry an aggregate event-count description', () => {
+  test('KindNode and ObjectNode TreeItems show (events / subscribers) in the description', () => {
     const store = new EventIndexStore();
     try {
       store.set({
@@ -381,7 +381,19 @@ suite('ui/treeView: EventTreeDataProvider', () => {
           makePublisher('table', 'Customer', 'OnInsert'),
           makePublisher('table', 'Customer', 'OnDelete')
         ],
-        subscribers: [],
+        subscribers: [
+          // Sales-Post.OnAfter ← 2 subscribers
+          makeSubscriber('codeunit', 'Sales-Post', 'OnAfter'),
+          makeSubscriber('codeunit', 'Sales-Post', 'OnAfter'),
+          // Sales-Post.OnBefore ← 1 subscriber
+          makeSubscriber('codeunit', 'Sales-Post', 'OnBefore'),
+          // (Sales-Post.OnDuring ← 0)
+          // Item-Post.OnAfter ← 1 subscriber
+          makeSubscriber('codeunit', 'Item-Post', 'OnAfter'),
+          // Customer.OnInsert ← 1 subscriber
+          makeSubscriber('table', 'Customer', 'OnInsert')
+          // (Customer.OnDelete ← 0)
+        ],
         appMeta: new Map()
       });
 
@@ -393,8 +405,10 @@ suite('ui/treeView: EventTreeDataProvider', () => {
         const item = provider.getTreeItem(kn);
         kindLabels.set(item.label as string, item);
       }
-      assert.strictEqual(kindLabels.get('Codeunit')!.description, '4', 'Codeunit has 4 events total');
-      assert.strictEqual(kindLabels.get('Table')!.description, '2', 'Table has 2 events total');
+      // Codeunit: 4 events (Sales-Post: 3, Item-Post: 1) · 4 subscribers (3 on Sales-Post + 1 on Item-Post)
+      assert.strictEqual(kindLabels.get('Codeunit')!.description, '(4 / 4)');
+      // Table: 2 events (both on Customer) · 1 subscriber
+      assert.strictEqual(kindLabels.get('Table')!.description, '(2 / 1)');
 
       const codeunitKindNode = kindNodes.find(
         (n) => provider.getTreeItem(n).label === 'Codeunit'
@@ -405,8 +419,10 @@ suite('ui/treeView: EventTreeDataProvider', () => {
         const item = provider.getTreeItem(on);
         objectByName.set(item.label as string, item);
       }
-      assert.strictEqual(objectByName.get('Sales-Post')!.description, '3');
-      assert.strictEqual(objectByName.get('Item-Post')!.description, '1');
+      // Sales-Post: 3 events · 3 subscribers (2 + 1 + 0)
+      assert.strictEqual(objectByName.get('Sales-Post')!.description, '(3 / 3)');
+      // Item-Post: 1 event · 1 subscriber
+      assert.strictEqual(objectByName.get('Item-Post')!.description, '(1 / 1)');
     } finally {
       store.dispose();
     }

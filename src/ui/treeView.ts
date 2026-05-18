@@ -16,19 +16,24 @@ interface AppNode {
 }
 
 /** Mid-level grouping: one per AL object kind (Codeunit, Table, Page, ...)
- *  within an app bucket. */
+ *  within an app bucket. `subscriberCount` is the sum of subscriber counts
+ *  across every publisher event in this kind bucket. */
 interface KindNode {
   readonly kind: 'kind';
   readonly objectKind: ObjectKind;
   readonly publishers: ReadonlyArray<Publisher>;
+  readonly subscriberCount: number;
 }
 
-/** Mid-level grouping: one per AL object (e.g. `Sales-Post`) within a kind bucket. */
+/** Mid-level grouping: one per AL object (e.g. `Sales-Post`) within a kind
+ *  bucket. `subscriberCount` is the sum of subscriber counts across every
+ *  event on this object. */
 interface ObjectNode {
   readonly kind: 'object';
   readonly objectKind: ObjectKind;
   readonly objectName: string;
   readonly publishers: ReadonlyArray<Publisher>;
+  readonly subscriberCount: number;
 }
 
 /** Leaf: a single publisher event, with its live subscriber count. */
@@ -132,8 +137,23 @@ function groupByApp(
   return nodes;
 }
 
+/** Sum the subscriber count across a publisher set, using the precomputed map. */
+function sumSubscribers(
+  publishers: ReadonlyArray<Publisher>,
+  countByKey: ReadonlyMap<string, number>
+): number {
+  let total = 0;
+  for (const p of publishers) {
+    total += countByKey.get(publisherKey(p)) ?? 0;
+  }
+  return total;
+}
+
 /** Group publishers by AL object kind, sorted alphabetically by display label. */
-function groupByKind(publishers: ReadonlyArray<Publisher>): KindNode[] {
+function groupByKind(
+  publishers: ReadonlyArray<Publisher>,
+  countByKey: ReadonlyMap<string, number>
+): KindNode[] {
   const buckets = new Map<ObjectKind, Publisher[]>();
   for (const p of publishers) {
     let bucket = buckets.get(p.owner.kind);
@@ -145,14 +165,22 @@ function groupByKind(publishers: ReadonlyArray<Publisher>): KindNode[] {
   }
   const nodes: KindNode[] = [];
   for (const [objectKind, bucketPublishers] of buckets) {
-    nodes.push({ kind: 'kind', objectKind, publishers: bucketPublishers });
+    nodes.push({
+      kind: 'kind',
+      objectKind,
+      publishers: bucketPublishers,
+      subscriberCount: sumSubscribers(bucketPublishers, countByKey)
+    });
   }
   nodes.sort((a, b) => formatKind(a.objectKind).localeCompare(formatKind(b.objectKind)));
   return nodes;
 }
 
 /** Group publishers by object name within a single-kind bucket. */
-function groupByObject(publishers: ReadonlyArray<Publisher>): ObjectNode[] {
+function groupByObject(
+  publishers: ReadonlyArray<Publisher>,
+  countByKey: ReadonlyMap<string, number>
+): ObjectNode[] {
   const buckets = new Map<string, Publisher[]>();
   for (const p of publishers) {
     let bucket = buckets.get(p.owner.name);
@@ -168,7 +196,8 @@ function groupByObject(publishers: ReadonlyArray<Publisher>): ObjectNode[] {
       kind: 'object',
       objectKind: bucketPublishers[0].owner.kind,
       objectName,
-      publishers: bucketPublishers
+      publishers: bucketPublishers,
+      subscriberCount: sumSubscribers(bucketPublishers, countByKey)
     });
   }
   nodes.sort((a, b) => a.objectName.localeCompare(b.objectName, undefined, { sensitivity: 'accent' }));
@@ -213,13 +242,13 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
     }
     if (node.kind === 'kind') {
       const item = new vscode.TreeItem(formatKind(node.objectKind), vscode.TreeItemCollapsibleState.Collapsed);
-      item.description = String(node.publishers.length);
+      item.description = `(${node.publishers.length} / ${node.subscriberCount})`;
       item.iconPath = new vscode.ThemeIcon(iconIdForKind(node.objectKind));
       return item;
     }
     if (node.kind === 'object') {
       const item = new vscode.TreeItem(node.objectName, vscode.TreeItemCollapsibleState.Collapsed);
-      item.description = String(node.publishers.length);
+      item.description = `(${node.publishers.length} / ${node.subscriberCount})`;
       item.iconPath = new vscode.ThemeIcon('symbol-file');
       return item;
     }
@@ -246,11 +275,13 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
     }
 
     if (node.kind === 'app') {
-      return groupByKind(node.publishers);
+      const counts = countSubscribersByPublisherKey(index.subscribers);
+      return groupByKind(node.publishers, counts);
     }
 
     if (node.kind === 'kind') {
-      return groupByObject(node.publishers);
+      const counts = countSubscribersByPublisherKey(index.subscribers);
+      return groupByObject(node.publishers, counts);
     }
 
     if (node.kind === 'object') {
