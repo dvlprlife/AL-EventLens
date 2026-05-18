@@ -16,6 +16,7 @@ import { resolveSubscribers } from './resolver';
  */
 export class EventIndexStore implements vscode.Disposable {
   private current: EventIndex = { publishers: [], subscribers: [], appMeta: new Map() };
+  private _isInitialized = false;
   private readonly _onDidChange = new vscode.EventEmitter<EventIndex>();
 
   /** Fires whenever `set` or `updateFile` mutates the index. */
@@ -27,11 +28,23 @@ export class EventIndexStore implements vscode.Disposable {
   }
 
   /**
+   * Whether the initial full-pass index has resolved at least once (success
+   * OR failure). UI surfaces use this to distinguish "indexing hasn't
+   * finished yet" — show a spinner placeholder — from "indexed and empty"
+   * — show the actual empty-state message. Flips to `true` on the first
+   * `set` or `updateFile`; never flips back.
+   */
+  public get isInitialized(): boolean {
+    return this._isInitialized;
+  }
+
+  /**
    * Replace the entire index in one shot. Used by the initial full pass
    * (`buildIndex` result) on activation and by manual refresh commands.
    */
   public set(index: EventIndex): void {
     this.current = index;
+    this._isInitialized = true;
     this._onDidChange.fire(index);
   }
 
@@ -67,6 +80,7 @@ export class EventIndexStore implements vscode.Disposable {
       subscribers: resolved,
       appMeta: this.current.appMeta
     };
+    this._isInitialized = true;
     this._onDidChange.fire(this.current);
   }
 

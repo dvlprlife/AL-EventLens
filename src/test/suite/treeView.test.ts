@@ -144,9 +144,38 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     }
   });
 
-  test('empty store yields a single placeholder node with `Refresh Index` text and collapsibleState None', () => {
+  test('uninitialized empty store yields a single `indexing` placeholder, not the `Refresh Index` empty-state', () => {
+    // The store starts uninitialized. Before the first set/updateFile, the
+    // tree must show "Indexing workspace…" with a spinner — NOT the
+    // "try Refresh" message — because the status bar is concurrently
+    // reporting progress on the first scan and a "try Refresh" hint would
+    // contradict it.
     const store = new EventIndexStore();
     try {
+      const provider = new EventTreeDataProvider(store);
+      const roots = provider.getChildren() as TreeNode[];
+      assert.strictEqual(roots.length, 1);
+      assert.strictEqual(roots[0].kind, 'indexing');
+
+      const item = provider.getTreeItem(roots[0]);
+      assert.ok(typeof item.label === 'string' && /indexing/i.test(item.label),
+        `expected label to mention 'Indexing', got: ${String(item.label)}`);
+      assert.strictEqual(item.collapsibleState, vscode.TreeItemCollapsibleState.None);
+      assert.ok(item.iconPath instanceof vscode.ThemeIcon);
+      assert.strictEqual((item.iconPath as vscode.ThemeIcon).id, 'sync~spin',
+        'indexing placeholder must use the spinning sync codicon');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('initialized empty store yields a single placeholder node with `Refresh Index` text and collapsibleState None', () => {
+    // After the initial index resolves (success OR failure), the store is
+    // marked initialized. An empty store at that point is genuinely empty
+    // and the "try Refresh" hint is appropriate.
+    const store = new EventIndexStore();
+    try {
+      store.set({ publishers: [], subscribers: [], appMeta: new Map() });
       const provider = new EventTreeDataProvider(store);
       const roots = provider.getChildren() as TreeNode[];
       assert.strictEqual(roots.length, 1);
@@ -474,6 +503,8 @@ suite('ui/treeView: EventTreeDataProvider', () => {
   test('EmptyNode TreeItem carries an info ThemeIcon', () => {
     const store = new EventIndexStore();
     try {
+      // Mark initialized so the empty store yields EmptyNode (not IndexingNode).
+      store.set({ publishers: [], subscribers: [], appMeta: new Map() });
       const provider = new EventTreeDataProvider(store);
       const [emptyNode] = provider.getChildren() as TreeNode[];
       assert.strictEqual(emptyNode.kind, 'empty');
