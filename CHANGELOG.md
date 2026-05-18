@@ -35,6 +35,7 @@ All notable changes to the AL EventLens extension will be documented in this fil
 ### Fixed
 
 - Activity bar icon (`package.json`, `images/activity-bar.svg`) was rendering as a grey placeholder because the contributed `viewsContainers.activitybar` entry pointed at `images/icon.png`, and VS Code's activity bar refuses to render colored PNGs — it requires a monochrome SVG that uses `currentColor` so it can re-tint per theme. Added a separate `images/activity-bar.svg` (magnifying glass + 3 connected event nodes, matching the marketplace PNG's concept in monochrome) and pointed the activity-bar `icon` field at it; the top-level marketplace `icon` field still uses `images/icon.png`.
+- Duplicate publishers from `.alpackages/*.app` packages that ship bundled `src/*.al` source (`src/index/indexer.ts`) — every event under any such package (Microsoft BaseApp, Business Foundation, Test Runner, etc.) was appearing twice in the panel list, tree, and CodeLens counts. The indexer was pushing publishers from both `parseSymbolReference` (the authoritative source per CLAUDE.md) AND from `parseAl` over the bundled `src/*.al` files. The bundled-source pass now contributes subscribers and trigger owners only; publishers come exclusively from `SymbolReference.json`. New regression test asserts an event declared in both surfaces appears exactly once.
 
 ## [0.1.0] - 2026-05-14
 
