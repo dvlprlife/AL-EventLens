@@ -191,11 +191,22 @@ function groupByObject(
 export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> {
   private readonly _onDidChangeTreeData = new vscode.EventEmitter<TreeNode | undefined | void>();
   public readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
+  /** Cached publisher-key → subscriber-count map for the current store state.
+   *  Invalidated on `refresh()`; recomputed lazily on first access per cycle. */
+  private _counts?: ReadonlyMap<string, number>;
 
   constructor(private readonly store: EventIndexStore) {}
 
   public refresh(): void {
+    this._counts = undefined;
     this._onDidChangeTreeData.fire();
+  }
+
+  private counts(): ReadonlyMap<string, number> {
+    if (!this._counts) {
+      this._counts = countSubscribersByPublisherKey(this.store.get().subscribers);
+    }
+    return this._counts;
   }
 
   public getTreeItem(node: TreeNode): vscode.TreeItem {
@@ -257,17 +268,15 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
     }
 
     if (node.kind === 'app') {
-      const counts = countSubscribersByPublisherKey(index.subscribers);
-      return groupByKind(node.publishers, counts);
+      return groupByKind(node.publishers, this.counts());
     }
 
     if (node.kind === 'kind') {
-      const counts = countSubscribersByPublisherKey(index.subscribers);
-      return groupByObject(node.publishers, counts);
+      return groupByObject(node.publishers, this.counts());
     }
 
     if (node.kind === 'object') {
-      const counts = countSubscribersByPublisherKey(index.subscribers);
+      const counts = this.counts();
       const sorted = [...node.publishers].sort((a, b) =>
         a.eventName.localeCompare(b.eventName, undefined, { sensitivity: 'accent' })
       );
