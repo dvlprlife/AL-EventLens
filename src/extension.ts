@@ -2,8 +2,7 @@ import * as vscode from 'vscode';
 import { getSelectedPublisher, openPanel, postSelectToPanel } from './ui/panel';
 import { registerTreeView } from './ui/treeView';
 import { registerCodeLens } from './ui/codelens';
-import { renderMermaid } from './ui/mermaid';
-import { findSubscribersFor } from './index/match';
+import { runExportMermaid } from './commands/exportMermaid';
 import { registerSaveWatcher } from './index/watcher';
 import { buildIndex } from './index/indexer';
 import { EventIndexStore } from './index/store';
@@ -60,23 +59,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   register('alEventLens.exportMermaid',   (...args) => {
     const publisher = (args[0] as Publisher | undefined) ?? getSelectedPublisher();
-    if (!publisher) {
-      void vscode.window.showWarningMessage(
-        'AL EventLens: open the panel and select a publisher to export.'
-      );
-      return;
-    }
-    const matches = findSubscribersFor(publisher, store.get().subscribers);
-    const mermaid = renderMermaid(publisher, matches);
-    void vscode.env.clipboard.writeText(mermaid).then(
-      () => vscode.window.showInformationMessage(
-        `AL EventLens: copied ${matches.length} subscriber${matches.length === 1 ? '' : 's'} to clipboard as Mermaid.`
-      ),
-      (err) => {
-        console.error('AL EventLens: clipboard write failed', err);
-        void vscode.window.showErrorMessage('AL EventLens: clipboard write failed; see Extension Host log.');
-      }
-    );
+    void runExportMermaid(publisher, store);
   });
 
   context.subscriptions.push(registerTreeView(context, store));
