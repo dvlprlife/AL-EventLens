@@ -118,6 +118,21 @@ suite('ui/mermaid: renderMermaid', () => {
       'raw " characters must not appear inside the label payload');
   });
 
+  test('labels escape <, >, & as HTML entities (and escape & first to avoid double-encoding)', () => {
+    const p = makePublisher('codeunit', 'Foo & <Bar> "Baz"', 'OnX');
+    const out = renderMermaid(p, []);
+    assert.ok(out.includes('Foo &amp; &lt;Bar&gt; &quot;Baz&quot;'),
+      `expected each special char entity-escaped; got:\n${out}`);
+    // No double-encoding: the `&` inside `&quot;` / `&lt;` / `&gt;` / `&amp;`
+    // must not have been re-encoded into `&amp;quot;` etc.
+    assert.ok(!out.includes('&amp;quot;'),
+      'must not double-encode entities (escape `&` first to avoid this)');
+    assert.ok(!out.includes('&amp;lt;'), 'must not double-encode &lt;');
+    assert.ok(!out.includes('&amp;gt;'), 'must not double-encode &gt;');
+    // No raw special chars in the payload.
+    assert.ok(!/Foo & </.test(out), 'raw `& <` must not appear');
+  });
+
   test('publisher label includes Kind::"Name"<br/>EventName', () => {
     const p = makePublisher('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc');
     const out = renderMermaid(p, []);

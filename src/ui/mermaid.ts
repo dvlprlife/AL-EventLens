@@ -1,10 +1,18 @@
 import { formatKind } from '../al/format';
 import type { Publisher, Subscriber } from '../al/types';
 
-/** Mermaid-safe label fragment. Inside `["..."]`, only `"` and newlines need
- *  escaping for the AL identifier shapes we emit. */
+/** Mermaid-safe label fragment. Inside `["..."]` most chars pass through, but
+ *  HTML-special characters (`&`, `<`, `>`, `"`) must be entity-escaped or the
+ *  Mermaid renderer can misparse them or produce broken output. `&` is
+ *  escaped first so the other replacements don't double-encode (`&quot;`
+ *  would become `&amp;quot;`). Newlines become `<br/>`. */
 function escapeLabel(s: string): string {
-  return s.replace(/"/g, '&quot;').replace(/\r?\n/g, '<br/>');
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/\r?\n/g, '<br/>');
 }
 
 function publisherLabel(p: Publisher): string {
