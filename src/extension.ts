@@ -4,7 +4,7 @@ import { registerTreeView } from './ui/treeView';
 import { registerCodeLens } from './ui/codelens';
 import { runExportMermaid } from './commands/exportMermaid';
 import { registerSaveWatcher } from './index/watcher';
-import { buildIndex } from './index/indexer';
+import { buildIndex, type EventIndex } from './index/indexer';
 import { EventIndexStore } from './index/store';
 import type { Publisher } from './al/types';
 
@@ -16,7 +16,7 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(vscode.commands.registerCommand(command, handler));
   };
 
-  const indexWithProgress = async (): Promise<Awaited<ReturnType<typeof buildIndex>>> =>
+  const indexWithProgress = async (): Promise<EventIndex> =>
     vscode.window.withProgress(
       { location: vscode.ProgressLocation.Window, title: 'AL EventLens' },
       async (progress) => buildIndex(context, progress)
