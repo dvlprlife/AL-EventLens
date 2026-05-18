@@ -511,4 +511,66 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       store.dispose();
     }
   });
+
+  test('ObjectNode TreeItem carries an alEventLens.revealObject command with the owner ref', () => {
+    // Clicking an object row in the activity-bar tree should drive the
+    // panel's app+kind+object filter, not just expand the row. The chevron
+    // still toggles collapse independently.
+    const store = new EventIndexStore();
+    try {
+      const APP_ID = '11111111-1111-1111-1111-111111111111';
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc', { appId: APP_ID }),
+          makePublisher('codeunit', 'Sales-Post', 'OnBeforePostSalesDoc', { appId: APP_ID })
+        ],
+        subscribers: [],
+        appMeta: new Map<string, AppMeta>([[APP_ID, { appId: APP_ID, name: 'Sales Mgmt' }]])
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const apps = provider.getChildren() as TreeNode[];
+      const kinds = provider.getChildren(apps[0]) as TreeNode[];
+      const objects = provider.getChildren(kinds[0]) as TreeNode[];
+      assert.strictEqual(objects.length, 1);
+      const objectNode = objects[0] as Extract<TreeNode, { kind: 'object' }>;
+      assert.strictEqual(objectNode.objectName, 'Sales-Post');
+
+      const item = provider.getTreeItem(objectNode);
+      assert.ok(item.command, 'ObjectNode TreeItem must carry a command');
+      assert.strictEqual(item.command!.command, 'alEventLens.revealObject');
+      assert.deepStrictEqual(item.command!.arguments, [
+        { kind: 'codeunit', name: 'Sales-Post', appId: APP_ID }
+      ]);
+      // Row also collapses, so collapsibleState must still be Collapsed.
+      assert.strictEqual(item.collapsibleState, vscode.TreeItemCollapsibleState.Collapsed);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('ObjectNode click command carries appId: undefined for workspace publishers', () => {
+    const store = new EventIndexStore();
+    try {
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'MyCu', 'OnAfterFoo')
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const apps = provider.getChildren() as TreeNode[];
+      const kinds = provider.getChildren(apps[0]) as TreeNode[];
+      const objects = provider.getChildren(kinds[0]) as TreeNode[];
+      const objectNode = objects[0] as Extract<TreeNode, { kind: 'object' }>;
+      const item = provider.getTreeItem(objectNode);
+      assert.deepStrictEqual(item.command!.arguments, [
+        { kind: 'codeunit', name: 'MyCu', appId: undefined }
+      ]);
+    } finally {
+      store.dispose();
+    }
+  });
 });

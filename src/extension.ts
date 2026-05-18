@@ -1,12 +1,12 @@
 import * as vscode from 'vscode';
-import { getSelectedPublisher, openPanel, postSelectToPanel } from './ui/panel';
+import { getSelectedPublisher, openPanel, postRevealObjectToPanel } from './ui/panel';
 import { registerTreeView } from './ui/treeView';
 import { registerCodeLens } from './ui/codelens';
 import { runExportMermaid } from './commands/exportMermaid';
 import { registerSaveWatcher } from './index/watcher';
 import { buildIndex, type EventIndex } from './index/indexer';
 import { EventIndexStore } from './index/store';
-import type { Publisher } from './al/types';
+import type { ObjectRef, Publisher } from './al/types';
 
 export function activate(context: vscode.ExtensionContext): void {
   const store = new EventIndexStore();
@@ -32,7 +32,15 @@ export function activate(context: vscode.ExtensionContext): void {
     if (!args[0]) { return; }
     const publisher = args[0] as Publisher;
     openPanel(context, store);
-    postSelectToPanel(publisher);
+    // Applies an object filter and selects the event inside it, so the
+    // revealed publisher is in view rather than buried in an unfiltered list.
+    postRevealObjectToPanel(publisher.owner, publisher);
+  });
+  register('alEventLens.revealObject', (...args) => {
+    if (!args[0]) { return; }
+    const owner = args[0] as ObjectRef;
+    openPanel(context, store);
+    postRevealObjectToPanel(owner);
   });
   register('alEventLens.gotoSubscriber',  (...args) => {
     if (!args[0]) { return; }

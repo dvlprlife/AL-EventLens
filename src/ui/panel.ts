@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
-import type { Publisher } from '../al/types';
+import type { ObjectRef, Publisher } from '../al/types';
+import { publisherKey } from '../index/match';
 import { EventIndexStore } from '../index/store';
 import { renderPanelHtml } from './panelHtml';
 
@@ -97,6 +98,48 @@ export function postSelectToPanel(publisher: Publisher): void {
     selectedPublisher = publisher;
     void activePanel.webview.postMessage({ type: 'select', publisher });
   }
+}
+
+/**
+ * Post a `{type:'reveal', search, selectKey?}` message to the active panel,
+ * if any. Used to drive the panel from external triggers (tree-view clicks,
+ * CodeLens) — sets the search box to apply an object filter, then optionally
+ * selects the supplied publisher inside the filtered view.
+ *
+ * `appKey` is matched in the panel against either the friendly app name or
+ * the `appId` GUID, so callers can pass whichever is convenient (the GUID is
+ * safer because it's stable across renames).
+ */
+export function postRevealObjectToPanel(
+  owner: Pick<ObjectRef, 'appId' | 'kind' | 'name'>,
+  selectPublisher?: Publisher
+): void {
+  if (!activePanel) {
+    return;
+  }
+  const search = buildObjectSearch(owner);
+  const selectKey = selectPublisher ? publisherKey(selectPublisher) : undefined;
+  if (selectPublisher) {
+    selectedPublisher = selectPublisher;
+  }
+  void activePanel.webview.postMessage({ type: 'reveal', search, selectKey });
+}
+
+function buildObjectSearch(owner: Pick<ObjectRef, 'appId' | 'kind' | 'name'>): string {
+  const parts: string[] = [];
+  // Workspace publishers have no appId; the panel recognizes the special
+  // `app:(workspace)` token for those.
+  parts.push(owner.appId ? `app:${quoteIfNeeded(owner.appId)}` : 'app:(workspace)');
+  parts.push(`kind:${owner.kind}`);
+  parts.push(`object:${quoteIfNeeded(owner.name)}`);
+  return parts.join(' ');
+}
+
+function quoteIfNeeded(value: string): string {
+  if (/[\s"]/.test(value)) {
+    return `"${value.replace(/"/g, '')}"`;
+  }
+  return value;
 }
 
 /**

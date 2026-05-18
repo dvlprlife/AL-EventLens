@@ -28,11 +28,13 @@ interface KindNode {
 
 /** Mid-level grouping: one per AL object (e.g. `Sales-Post`) within a kind
  *  bucket. `subscriberCount` is the sum of subscriber counts across every
- *  event on this object. */
+ *  event on this object. `appId` carries the owning bucket so a click can
+ *  drive the panel's app+kind+object filter from a single payload. */
 interface ObjectNode {
   readonly kind: 'object';
   readonly objectKind: ObjectKind;
   readonly objectName: string;
+  readonly appId: string | undefined;
   readonly publishers: ReadonlyArray<Publisher>;
   readonly subscriberCount: number;
 }
@@ -178,6 +180,7 @@ function groupByObject(
       kind: 'object',
       objectKind: bucketPublishers[0].owner.kind,
       objectName,
+      appId: bucketPublishers[0].owner.appId,
       publishers: bucketPublishers,
       subscriberCount: sumSubscribers(bucketPublishers, countByKey)
     });
@@ -243,6 +246,13 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
       const item = new vscode.TreeItem(node.objectName, vscode.TreeItemCollapsibleState.Collapsed);
       item.description = `(${node.publishers.length} / ${node.subscriberCount})`;
       item.iconPath = new vscode.ThemeIcon('symbol-file');
+      // Clicking the row reveals the panel and filters it to this object's
+      // events. The chevron still toggles expand/collapse independently.
+      item.command = {
+        command: 'alEventLens.revealObject',
+        title: 'Reveal Object in Panel',
+        arguments: [{ kind: node.objectKind, name: node.objectName, appId: node.appId }]
+      };
       return item;
     }
     // event leaf

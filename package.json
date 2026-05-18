@@ -55,6 +55,7 @@
       { "command": "alEventLens.openPanel",         "title": "Open Panel",                "category": "AL EventLens" },
       { "command": "alEventLens.refresh",           "title": "Refresh Index",             "category": "AL EventLens" },
       { "command": "alEventLens.revealPublisher",   "title": "Reveal Publisher",          "category": "AL EventLens" },
+      { "command": "alEventLens.revealObject",      "title": "Reveal Object",             "category": "AL EventLens" },
       { "command": "alEventLens.gotoSubscriber",    "title": "Go to Subscriber",          "category": "AL EventLens" },
       { "command": "alEventLens.exportMermaid",     "title": "Export to Mermaid",         "category": "AL EventLens" }
     ],
