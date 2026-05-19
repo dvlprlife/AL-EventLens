@@ -140,7 +140,31 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
       'v2 cache payloads must be treated as misses so the indexer re-parses and captures signature parameters');
   });
 
-  test('round-trip: publisher parameters survive store/load (v3)', async () => {
+  test('old (v3) cache payloads are silently ignored on load — v4 invalidates entries poisoned by the namespace-walk bug', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`);
+    // v3 shape: identical on-disk layout to v4, but the publisher list could
+    // be missing everything inside Namespaces[] because the old dispatcher
+    // routed string inputs to the flat-only parser.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 3,
+        publishers: [
+          { owner: { kind: 'codeunit', name: 'Stale', appId: 'X' }, eventName: 'OnStale', kind: 'integration' }
+        ],
+        name: 'Sample',
+        appPublisher: 'Acme'
+      }))
+    );
+    const result = await loadCachedSymbols(ctx, key);
+    assert.strictEqual(result, undefined,
+      'v3 cache payloads must be treated as misses so the indexer re-parses with the fixed namespace walk');
+  });
+
+  test('round-trip: publisher parameters survive store/load (v4)', async () => {
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
     const pub: Publisher = {
       owner: { kind: 'codeunit', name: 'Sales-Post', appId: 'X' },
