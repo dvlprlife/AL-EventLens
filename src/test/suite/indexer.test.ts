@@ -296,6 +296,62 @@ suite('index/indexer: buildIndex', () => {
     assert.strictEqual(appPub!.owner.appId, '11111111-1111-1111-1111-111111111111');
   });
 
+  test('workspace publishers carry `owner.appId === undefined` so the tree groups them into the `(workspace)` bucket', async () => {
+    // Direct regression for the user-reported "events from my workspace are
+    // not listed" symptom path: the tree groups by `owner.appId` with
+    // `undefined` mapped to the `(workspace)` bucket, so a workspace
+    // publisher must carry `appId: undefined` (NOT an empty string, NOT
+    // the .app GUID, NOT inherited from anywhere) for the bucket to appear.
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes();
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appUri.toString(), appBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const workspacePubs = idx.publishers.filter((p) => p.owner.appId === undefined);
+    const appPubs = idx.publishers.filter((p) => p.owner.appId !== undefined);
+    assert.strictEqual(workspacePubs.length, 1,
+      `expected exactly one workspace publisher (OnAfterFoo); got ${workspacePubs.length}: ${JSON.stringify(workspacePubs.map((p) => p.eventName))}`);
+    assert.strictEqual(workspacePubs[0].eventName, 'OnAfterFoo');
+    assert.strictEqual(appPubs.length, 1,
+      `expected exactly one .app publisher (OnAppEvent); got ${appPubs.length}`);
+    assert.strictEqual(appPubs[0].owner.appId, '11111111-1111-1111-1111-111111111111');
+  });
+
+  test('synthesized workspace trigger publishers also carry `owner.appId === undefined`', async () => {
+    // Triggers join the same per-app dedup map as parsed publishers; a
+    // regression that tagged workspace triggers with an appId would hide
+    // them from the `(workspace)` bucket the same way.
+    const tableUri = vscode.Uri.parse('file:///workspace/MyTable.al');
+    const fs: FakeFs = {
+      bytes: new Map([[tableUri.toString(), encode(SAMPLE_TABLE_AL)]])
+    };
+    applyPatches({
+      alFiles: [tableUri],
+      appFiles: [],
+      fs
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const triggerPubs = idx.publishers.filter((p) => p.kind === 'trigger');
+    assert.strictEqual(triggerPubs.length, 10);
+    assert.ok(triggerPubs.every((p) => p.owner.appId === undefined),
+      'every synthesized trigger from a workspace Table must have appId: undefined');
+  });
+
   test('tolerates a corrupted .app: warns and continues with the remaining packages', async () => {
     const badUri = vscode.Uri.parse('file:///workspace/.alpackages/Bad.app');
     const goodUri = vscode.Uri.parse('file:///workspace/.alpackages/Good.app');

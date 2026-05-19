@@ -70,6 +70,57 @@ suite('ui/treeView: EventTreeDataProvider', () => {
     }
   });
 
+  test('regression: `(workspace)` bucket contains the workspace publisher and is reachable end-to-end', () => {
+    // Direct regression for "events from my workspace are not listed": a
+    // single workspace publisher (owner.appId === undefined) MUST surface
+    // as a reachable EventNode under the `(workspace)` AppNode bucket,
+    // even when dependency-app buckets are also present. The earlier test
+    // only checks bucket ordering; this drills the path App → Kind → Object
+    // → Event to confirm the workspace publisher actually shows up at the
+    // leaf the user clicks.
+    const store = new EventIndexStore();
+    try {
+      store.set({
+        publishers: [
+          // Workspace publisher (no appId)
+          makePublisher('codeunit', 'My Workspace Codeunit', 'OnSomething'),
+          // Dependency publisher (with appId) — sibling bucket, must not
+          // shadow or absorb the workspace one
+          makePublisher('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc', { appId: 'Microsoft.SalesMgmt' })
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const roots = provider.getChildren() as TreeNode[];
+      const workspaceApp = roots.find((n) =>
+        n.kind === 'app' && (n as Extract<TreeNode, { kind: 'app' }>).label === '(workspace)'
+      ) as Extract<TreeNode, { kind: 'app' }> | undefined;
+      assert.ok(workspaceApp, '(workspace) AppNode must exist whenever any workspace publisher does');
+
+      const kinds = provider.getChildren(workspaceApp) as TreeNode[];
+      assert.strictEqual(kinds.length, 1, 'one KindNode (Codeunit) under (workspace)');
+      const codeunitKind = kinds[0] as Extract<TreeNode, { kind: 'kind' }>;
+      assert.strictEqual(codeunitKind.objectKind, 'codeunit');
+
+      const objects = provider.getChildren(codeunitKind) as TreeNode[];
+      assert.strictEqual(objects.length, 1);
+      const objectNode = objects[0] as Extract<TreeNode, { kind: 'object' }>;
+      assert.strictEqual(objectNode.objectName, 'My Workspace Codeunit');
+      assert.strictEqual(objectNode.appId, undefined,
+        'workspace ObjectNode must carry appId: undefined so revealObject filters correctly');
+
+      const events = provider.getChildren(objectNode) as TreeNode[];
+      assert.strictEqual(events.length, 1);
+      const eventNode = events[0] as Extract<TreeNode, { kind: 'event' }>;
+      assert.strictEqual(eventNode.publisher.eventName, 'OnSomething');
+      assert.strictEqual(eventNode.publisher.owner.appId, undefined);
+    } finally {
+      store.dispose();
+    }
+  });
+
   test('event leaf label is `<EventName> · (N)` with the live subscriber count — both 0 and >0', () => {
     const store = new EventIndexStore();
     try {

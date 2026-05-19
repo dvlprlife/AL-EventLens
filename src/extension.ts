@@ -4,7 +4,8 @@ import { registerTreeView } from './ui/treeView';
 import { registerCodeLens } from './ui/codelens';
 import { runExportMermaid } from './commands/exportMermaid';
 import { registerSaveWatcher } from './index/watcher';
-import { buildIndex, type EventIndex } from './index/indexer';
+import { registerWorkspaceFolderReindex } from './index/folderWatcher';
+import { runIndexWithProgress } from './index/reindex';
 import { EventIndexStore } from './index/store';
 import type { ObjectRef, Publisher } from './al/types';
 import { reviveRange } from './util/reviveLocation';
@@ -17,15 +18,9 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(vscode.commands.registerCommand(command, handler));
   };
 
-  const indexWithProgress = async (): Promise<EventIndex> =>
-    vscode.window.withProgress(
-      { location: vscode.ProgressLocation.Window, title: 'AL EventLens' },
-      async (progress) => buildIndex(context, progress)
-    );
-
   register('alEventLens.openPanel',       () => openPanel(context, store));
   register('alEventLens.refresh',         () => {
-    indexWithProgress()
+    runIndexWithProgress(context)
       .then((idx) => store.set(idx))
       .catch((err) => console.error('AL EventLens: refresh failed', err));
   });
@@ -73,13 +68,14 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(registerTreeView(store));
   context.subscriptions.push(registerCodeLens(context, store));
   context.subscriptions.push(registerSaveWatcher(context, store));
+  context.subscriptions.push(registerWorkspaceFolderReindex(context, store));
 
   // Fire-and-forget initial index. The result populates the store so the
   // panel, tree, and CodeLens surfaces can render once it completes.
   // On failure, still mark the store initialized (with an empty index) so
   // the tree's `indexing…` placeholder progresses to the real empty-state
   // message rather than spinning forever.
-  indexWithProgress()
+  runIndexWithProgress(context)
     .then((idx) => {
       store.set(idx);
       console.log(`AL EventLens: indexed ${idx.publishers.length} publishers, ${idx.subscribers.length} subscribers`);
