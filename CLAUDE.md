@@ -23,7 +23,7 @@ Before generating new code or docs, read the two reference repos:
 - `C:/Users/brad/GitHub/Selection-Count`
 
 Match the patterns you find there. Specifically:
-- README structure: tagline → short paragraph → Demo (GIFs) → Features
+- README structure: tagline → short paragraph → Screenshots → Features
   (bold name + dash + plain explanation) → Commands table → Keybindings
   table → Settings table → Requirements → Issues → License.
 - Tone: direct and technical. No hyperbole, no marketing voice.

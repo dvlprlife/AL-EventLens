@@ -36,6 +36,7 @@ AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscri
 | `AL EventLens: Open Panel` | Open the searchable publisher/subscriber webview panel. |
 | `AL EventLens: Refresh Index` | Force a full re-index of the workspace and `.alpackages` dependencies. |
 | `AL EventLens: Reveal Publisher` | Open the panel scoped to the publisher under the cursor (also fired by CodeLens). |
+| `AL EventLens: Reveal Object` | Open the panel and filter the publisher list to a specific AL object (fired by clicking an object row in the activity-bar tree). |
 | `AL EventLens: Go to Subscriber` | Jump to the source location of a subscriber selected in the panel. |
 | `AL EventLens: Export to Mermaid` | Copy a Mermaid diagram of the current publisher's subscribers to the clipboard. |
 
