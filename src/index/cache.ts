@@ -22,11 +22,15 @@ const SYMBOLS_DIR = 'symbols';
 /** Bump whenever the on-disk shape changes. v2 added `name` / `appPublisher`
  *  alongside the previously-bare publisher array. v3 added per-publisher
  *  `parameters` (procedure signature) so the panel can render them without a
- *  re-parse. Older entries are silently treated as cache misses. */
-const SCHEMA_VERSION = 3;
+ *  re-parse. v4 has the same on-disk shape as v3 but invalidates entries
+ *  written by the broken symbol-reference dispatcher that silently dropped
+ *  publishers inside `Namespaces[]` (everything under a namespace in BC 24+
+ *  packages — i.e. almost all of BaseApp). Older entries are silently
+ *  treated as cache misses. */
+const SCHEMA_VERSION = 4;
 
-interface CachedPayloadV3 {
-  readonly schemaVersion: 3;
+interface CachedPayloadV4 {
+  readonly schemaVersion: 4;
   readonly publishers: Publisher[];
   readonly name?: string;
   readonly appPublisher?: string;
@@ -95,7 +99,7 @@ export async function loadCachedSymbols(
   ) {
     return undefined;
   }
-  const payload = parsed as CachedPayloadV3;
+  const payload = parsed as CachedPayloadV4;
   // Cached records intentionally have no `vscode.Location` — see
   // storeCachedSymbols. Cast is safe because every consumer treats
   // `Publisher.location` as optional.
@@ -165,7 +169,7 @@ export async function storeCachedSymbols(
     kind,
     ...(parameters !== undefined ? { parameters } : {})
   }));
-  const payload: CachedPayloadV3 = {
+  const payload: CachedPayloadV4 = {
     schemaVersion: SCHEMA_VERSION,
     publishers: strippedPublishers as Publisher[],
     name: meta?.name,

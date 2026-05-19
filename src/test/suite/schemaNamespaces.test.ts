@@ -173,4 +173,41 @@ suite('symbols/detect: dispatch', () => {
     assert.strictEqual(publishers.length, 1);
     assert.strictEqual(publishers[0].eventName, 'OnFlat');
   });
+
+  test('accepts a JSON string carrying the nested Namespaces[] schema', () => {
+    // Regression: the indexer calls parseSymbolReference with the raw
+    // SymbolReference.json string (AppContents.symbolReferenceJson is typed
+    // string), not an already-parsed object. The previous dispatcher only
+    // recognized the nested schema when typeof json === 'object', so string
+    // inputs were silently routed to the flat-only walk — dropping every
+    // publisher inside Namespaces[] in BC 24+ packages (which is basically
+    // all of BaseApp).
+    const jsonString = JSON.stringify({
+      AppId: APP_ID,
+      Namespaces: [{ Name: 'Foo', Codeunits: [codeunit(1, 'Cu', 'OnFromString')] }]
+    });
+    const publishers = parseSymbolReference(jsonString, APP_ID);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnFromString');
+  });
+
+  test('hybrid schemas (top-level Codeunits[] AND Namespaces[]) return publishers from both surfaces', () => {
+    // Regression: BC 26+ Microsoft BaseApp ships both a small set of
+    // un-namespaced top-level objects AND a large nested Namespaces[] tree.
+    // The dispatcher must not treat the schemas as mutually exclusive; the
+    // unified walk extracts from both.
+    const json = {
+      AppId: APP_ID,
+      Codeunits: [codeunit(1, 'LegacyCu', 'OnLegacy')],
+      Namespaces: [
+        { Name: 'Sales.Posting', Codeunits: [codeunit(80, 'Sales-Post', 'OnAfterPostSalesDoc')] }
+      ]
+    };
+    const publishers = parseSymbolReference(json, APP_ID);
+    const names = publishers.map((p) => `${p.owner.name}.${p.eventName}`).sort();
+    assert.deepStrictEqual(names, [
+      'LegacyCu.OnLegacy',
+      'Sales-Post.OnAfterPostSalesDoc'
+    ]);
+  });
 });
