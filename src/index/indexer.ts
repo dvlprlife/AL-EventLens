@@ -1,11 +1,12 @@
 import * as vscode from 'vscode';
 import { parseAl } from '../al/parser';
 import { collectTriggerOwners, synthesizeTriggerPublishers } from '../al/triggers';
-import { readApp } from '../symbols/appReader';
+import { readApp, readAppMetadata } from '../symbols/appReader';
 import { parseSymbolReference } from '../symbols/detect';
 import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
 import { resolveSubscribers } from './resolver';
 import type { AppMeta, ObjectRef, Publisher, Subscriber } from '../al/types';
+import { compareVersions } from '../util/versions';
 
 /** A fully built, resolved event index for one workspace session. */
 export interface EventIndex {
@@ -36,6 +37,7 @@ export async function buildIndex(
   const cfg = vscode.workspace.getConfiguration('alEventLens');
   const scanAlpackages = cfg.get<boolean>('scanAlpackages', true);
   const includeTriggerEvents = cfg.get<boolean>('includeTriggerEvents', true);
+  const includeAllAppVersions = cfg.get<boolean>('includeAllAppVersions', false);
 
   const publishers: Publisher[] = [];
   const subscribers: Subscriber[] = [];
@@ -64,7 +66,10 @@ export async function buildIndex(
 
   // Pass 2: .alpackages/*.app dependency packages.
   if (scanAlpackages) {
-    const appUris = await vscode.workspace.findFiles('**/.alpackages/*.app');
+    const allAppUris = await vscode.workspace.findFiles('**/.alpackages/*.app');
+    const appUris = includeAllAppVersions
+      ? allAppUris
+      : await selectHighestVersionPerAppId(allAppUris);
     progress?.report({
       message: `Scanning .alpackages (${appUris.length} package${appUris.length === 1 ? '' : 's'})`
     });
@@ -124,4 +129,51 @@ export async function buildIndex(
   progress?.report({ message: 'Resolving subscriber links' });
   const resolved = resolveSubscribers(publishers, subscribers);
   return { publishers, subscribers: resolved, appMeta };
+}
+
+/**
+ * Group `.app` URIs by their manifest `appId` and return only the
+ * highest-`Version` URI per group. Cheap-path: reads only `NavxManifest.xml`
+ * (via `readAppMetadata`), not `SymbolReference.json` or bundled `src/**`,
+ * so losers don't pay the full-parse cost.
+ *
+ * Tie-break: when two `.app` files share the same `appId` AND identical
+ * `Version`, pick deterministically (first URI by `toString()` order) and
+ * `console.warn` the collision so the user can clean up the folder.
+ *
+ * Per-file metadata-read failures are tolerated the same way the main
+ * `readApp` loop tolerates parse failures — `console.warn` + continue, so a
+ * single bad `.app` cannot abort the dedupe pass.
+ */
+async function selectHighestVersionPerAppId(
+  uris: ReadonlyArray<vscode.Uri>
+): Promise<vscode.Uri[]> {
+  const winners = new Map<string, { uri: vscode.Uri; version: string }>();
+  // Deterministic order so ties resolve the same way every run.
+  const sortedUris = [...uris].sort((a, b) => a.toString().localeCompare(b.toString()));
+  for (const uri of sortedUris) {
+    let meta: { appId: string; version: string };
+    try {
+      meta = await readAppMetadata(uri);
+    } catch (err) {
+      console.warn(`AL EventLens: failed to read metadata from ${uri.fsPath}: ${err}`);
+      continue;
+    }
+    const existing = winners.get(meta.appId);
+    if (!existing) {
+      winners.set(meta.appId, { uri, version: meta.version });
+      continue;
+    }
+    const cmp = compareVersions(meta.version, existing.version);
+    if (cmp > 0) {
+      winners.set(meta.appId, { uri, version: meta.version });
+    } else if (cmp === 0) {
+      console.warn(
+        `AL EventLens: duplicate .app for appId=${meta.appId} version=${meta.version} ` +
+        `(keeping ${existing.uri.fsPath}, skipping ${uri.fsPath})`
+      );
+    }
+    // cmp < 0: existing already higher, keep it.
+  }
+  return [...winners.values()].map((v) => v.uri);
 }

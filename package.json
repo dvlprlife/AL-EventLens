@@ -76,6 +76,11 @@
           "default": true,
           "description": "Scan .alpackages/*.app files in the workspace for publishers (and bundled subscribers, where present) in addition to workspace AL source."
         },
+        "alEventLens.includeAllAppVersions": {
+          "type": "boolean",
+          "default": false,
+          "description": "When .alpackages contains multiple versions of the same app (same appId, different Version), index all of them instead of just the highest. Off by default: each appId contributes exactly one set of publishers (the highest Version), matching how the official AL extension resolves dependencies. Turn on for multi-target / platform-version testing setups where every version's publishers should appear."
+        },
         "alEventLens.includeTriggerEvents": {
           "type": "boolean",
           "default": true,
