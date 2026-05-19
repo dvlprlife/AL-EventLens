@@ -13,8 +13,9 @@ subscribers across an AL/Business Central workspace and its dependency apps.
 - Activity bar view ID: `alEventLensView`
 - Engine: `^1.85.0`
 - License: MIT
-- Tagline: *See event publishers and subscribers across your AL workspace,
-  and the lines that connect them.*
+- Tagline: *See event publishers and subscribers across your AL /
+  Microsoft Dynamics 365 Business Central workspace, and the lines
+  that connect them.*
 
 ## Author conventions (carry from existing dvlprlife extensions)
 Before generating new code or docs, read the two reference repos:

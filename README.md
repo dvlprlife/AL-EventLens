@@ -1,8 +1,8 @@
 # AL EventLens
 
-See event publishers and subscribers across your AL workspace, and the lines that connect them.
+See event publishers and subscribers across your AL / Microsoft Dynamics 365 Business Central workspace, and the lines that connect them.
 
-AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscriber]` declarations in your AL workspace and its `.alpackages` dependencies, then surfaces the resolved publisher → subscriber graph in a searchable panel, an activity-bar view, and inline CodeLens hints. No more grepping across apps to figure out who is listening to which event.
+AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscriber]` declarations in your AL workspace for Microsoft Dynamics 365 Business Central and its `.alpackages` dependencies, then surfaces the resolved publisher → subscriber graph in a searchable panel, an activity-bar view, and inline CodeLens hints. No more grepping across apps to figure out who is listening to which event.
 
 ## Screenshots
 
