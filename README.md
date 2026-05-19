@@ -49,6 +49,7 @@ All commands are available through the Command Palette (search for "AL EventLens
 | `alEventLens.cache.enabled` | `true` | Cache parsed `.app` symbol results in extension global storage. |
 | `alEventLens.indexOnSave` | `true` | Re-index AL files incrementally when they are saved. |
 | `alEventLens.scanAlpackages` | `true` | Index `.alpackages/*.app` packages in addition to workspace source. |
+| `alEventLens.includeAllAppVersions` | `false` | When `.alpackages` carries multiple versions of the same app, index all of them instead of just the highest. |
 | `alEventLens.includeTriggerEvents` | `true` | Synthesize virtual publishers for table/page trigger events. |
 | `alEventLens.codeLens.enabled` | `true` | Show subscriber-count CodeLens above event declarations. |
 

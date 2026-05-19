@@ -4,6 +4,14 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Fixed
+
+- Duplicate publishers when `.alpackages` carried multiple versions of the same app (`src/index/indexer.ts`, `src/symbols/appReader.ts`, `src/util/versions.ts`). A user with stock BC 26.5 + 27.0 + 28.0 BaseApp `.app` files in `.alpackages` was getting all three versions' events in the index — ~70k BaseApp events under one bucket instead of ~23k, with subscriber-count badges, CodeLens counts, and panel rows all multiplied. The indexer now groups `.alpackages/*.app` files by their manifest `appId` and keeps only the highest-`Version` URI per group (matching how the official AL extension resolves dependencies). New `readAppMetadata` / `parseAppMetadataBytes` exports do a cheap `NavxManifest.xml`-only read so losers don't pay the `SymbolReference.json` decompression or bundled-`src/**/*.al` walk. Ties on identical `(appId, Version)` resolve deterministically (first URI in `toString` order) with a `console.warn`. The previous behavior is preserved as an opt-in via the new `alEventLens.includeAllAppVersions` setting (default `false`), for multi-target / platform-version testing setups. Per-`.app` metadata-read failures during the dedupe pass tolerate the same `console.warn` + continue pattern the full-parse loop already uses.
+
+### Added
+
+- `alEventLens.includeAllAppVersions` setting (boolean, default `false`) — see the Fixed entry above. When `true`, restores the pre-fix behavior of indexing every `.app` file regardless of `appId` duplication.
+
 ## [0.1.1] - 2026-05-19
 
 ### Added

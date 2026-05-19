@@ -81,6 +81,7 @@ interface FakeFs {
 interface Patches {
   scanAlpackages?: boolean;
   includeTriggerEvents?: boolean;
+  includeAllAppVersions?: boolean;
   alFiles?: vscode.Uri[];
   appFiles?: vscode.Uri[];
   fs: FakeFs;
@@ -176,6 +177,9 @@ function applyPatches(p: Patches): void {
           }
           if (key === 'includeTriggerEvents') {
             return (p.includeTriggerEvents ?? true) as unknown as T;
+          }
+          if (key === 'includeAllAppVersions') {
+            return (p.includeAllAppVersions ?? false) as unknown as T;
           }
           return defaultValue as T;
         },
@@ -717,5 +721,174 @@ suite('index/indexer: buildIndex', () => {
       'Scanning .alpackages (1 package)',
       'Resolving subscriber links'
     ], `unexpected progress sequence on cache hit: ${JSON.stringify(messages)}`);
+  });
+
+  // ─── Multi-version `.alpackages` dedupe ─────────────────────────────────
+
+  function buildAppManifest(appId: string, version: string, name = 'Sample'): string {
+    return `<?xml version="1.0" encoding="utf-8"?>
+<Package>
+  <App Id="${appId}" Name="${name}" Publisher="Test" Version="${version}" />
+</Package>`;
+  }
+
+  function buildVersionedSymbol(appId: string, eventName: string): string {
+    return JSON.stringify({
+      AppId: appId,
+      Codeunits: [
+        {
+          Name: 'Cu',
+          Methods: [{ Name: eventName, Attributes: [{ Name: 'IntegrationEvent' }] }]
+        }
+      ]
+    });
+  }
+
+  test('multi-version dedupe (default): same appId across 3 versions → only highest version indexes', async () => {
+    const APP_ID = '11111111-1111-1111-1111-111111111111';
+    const v1Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_1.0.0.0.app');
+    const v2Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_2.0.0.0.app');
+    const v3Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_2.1.0.0.app');
+    const v1Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV1')
+    });
+    const v2Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV2')
+    });
+    const v3Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.1.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV3')
+    });
+    applyPatches({
+      alFiles: [],
+      appFiles: [v1Uri, v2Uri, v3Uri],
+      fs: { bytes: new Map([
+        [v1Uri.toString(), v1Bytes],
+        [v2Uri.toString(), v2Bytes],
+        [v3Uri.toString(), v3Bytes]
+      ]) },
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const events = idx.publishers.filter((p) => p.owner.appId === APP_ID).map((p) => p.eventName);
+    assert.deepStrictEqual(events, ['OnV3'],
+      `default dedupe must keep only the highest version's publishers; got ${JSON.stringify(events)}`);
+  });
+
+  test('multi-version override: `includeAllAppVersions: true` keeps every version', async () => {
+    const APP_ID = '22222222-2222-2222-2222-222222222222';
+    const v1Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_1.0.0.0.app');
+    const v2Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_2.0.0.0.app');
+    const v3Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_2.1.0.0.app');
+    const v1Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV1')
+    });
+    const v2Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV2')
+    });
+    const v3Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.1.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV3')
+    });
+    applyPatches({
+      alFiles: [],
+      appFiles: [v1Uri, v2Uri, v3Uri],
+      fs: { bytes: new Map([
+        [v1Uri.toString(), v1Bytes],
+        [v2Uri.toString(), v2Bytes],
+        [v3Uri.toString(), v3Bytes]
+      ]) },
+      includeTriggerEvents: false,
+      includeAllAppVersions: true
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const events = idx.publishers
+      .filter((p) => p.owner.appId === APP_ID)
+      .map((p) => p.eventName)
+      .sort();
+    assert.deepStrictEqual(events, ['OnV1', 'OnV2', 'OnV3'],
+      `override must surface every version's publishers; got ${JSON.stringify(events)}`);
+  });
+
+  test('heterogeneous .alpackages: distinct appIds dedupe independently', async () => {
+    const APP_BASE = '33333333-3333-3333-3333-333333333333';
+    const APP_SYS  = '44444444-4444-4444-4444-444444444444';
+    const baseV1 = vscode.Uri.parse('file:///workspace/.alpackages/Base_1.0.0.0.app');
+    const baseV2 = vscode.Uri.parse('file:///workspace/.alpackages/Base_2.0.0.0.app');
+    const sysV1  = vscode.Uri.parse('file:///workspace/.alpackages/Sys_1.0.0.0.app');
+    applyPatches({
+      alFiles: [],
+      appFiles: [baseV1, baseV2, sysV1],
+      fs: { bytes: new Map([
+        [baseV1.toString(), await buildAppBytes({
+          manifestXml: buildAppManifest(APP_BASE, '1.0.0.0', 'Base'),
+          symbolReferenceJson: buildVersionedSymbol(APP_BASE, 'OnBaseV1')
+        })],
+        [baseV2.toString(), await buildAppBytes({
+          manifestXml: buildAppManifest(APP_BASE, '2.0.0.0', 'Base'),
+          symbolReferenceJson: buildVersionedSymbol(APP_BASE, 'OnBaseV2')
+        })],
+        [sysV1.toString(), await buildAppBytes({
+          manifestXml: buildAppManifest(APP_SYS, '1.0.0.0', 'Sys'),
+          symbolReferenceJson: buildVersionedSymbol(APP_SYS, 'OnSysV1')
+        })]
+      ]) },
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const baseEvents = idx.publishers
+      .filter((p) => p.owner.appId === APP_BASE).map((p) => p.eventName).sort();
+    const sysEvents = idx.publishers
+      .filter((p) => p.owner.appId === APP_SYS).map((p) => p.eventName).sort();
+    assert.deepStrictEqual(baseEvents, ['OnBaseV2'],
+      'Base must dedupe to its highest version');
+    assert.deepStrictEqual(sysEvents, ['OnSysV1'],
+      'Sys must pass through (only one version present)');
+  });
+
+  test('identical (appId, Version) tie: keeps one URI deterministically and warns', async () => {
+    const APP_ID = '55555555-5555-5555-5555-555555555555';
+    // Two distinct URIs (filename differs) but identical (appId, Version) inside.
+    // Pick filenames whose toString() ordering is unambiguous.
+    const uriA = vscode.Uri.parse('file:///workspace/.alpackages/Sample_a.app');
+    const uriB = vscode.Uri.parse('file:///workspace/.alpackages/Sample_b.app');
+    const aBytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnFromA')
+    });
+    const bBytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnFromB')
+    });
+    applyPatches({
+      alFiles: [],
+      appFiles: [uriA, uriB],
+      fs: { bytes: new Map([
+        [uriA.toString(), aBytes],
+        [uriB.toString(), bBytes]
+      ]) },
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const events = idx.publishers
+      .filter((p) => p.owner.appId === APP_ID).map((p) => p.eventName);
+    assert.strictEqual(events.length, 1,
+      `tie must keep exactly one .app; got ${JSON.stringify(events)}`);
+    // Deterministic: sortedByToString picks uriA first.
+    assert.strictEqual(events[0], 'OnFromA');
+    const dupWarn = warnCalls.find((m) => m.includes('duplicate .app for appId'));
+    assert.ok(dupWarn, `expected a "duplicate .app for appId" warning, got: ${JSON.stringify(warnCalls)}`);
   });
 });
