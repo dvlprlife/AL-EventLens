@@ -4,6 +4,8 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-05-19
+
 ### Added
 
 - Object click in the activity-bar tree now drives the panel filter (`src/ui/treeView.ts`, `src/ui/panel.ts`, `src/ui/panelHtml.ts`, `src/extension.ts`, `package.json`). Clicking an `ObjectNode` row reveals the panel and applies an `app:<id> kind:<k> object:<name>` filter so only that object's events show — the chevron still toggles expand/collapse independently. Clicking an `EventNode` leaf (or an inline CodeLens) applies the same filter and additionally selects the event inside it, so the revealed publisher is in view rather than buried in an unfiltered list. The panel's search box gains an `object:` prefix matching the existing `app:`/`kind:` pattern, plus quoted-token support (`object:"Sales Header"`) so object names with spaces round-trip cleanly. New command `alEventLens.revealObject` and new `{type:'reveal', search, selectKey?}` panel message.
