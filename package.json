@@ -2,7 +2,7 @@
   "name": "al-eventlens",
   "displayName": "AL EventLens",
   "description": "See event publishers and subscribers across your AL workspace, and the lines that connect them.",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "dvlprlife",
   "license": "MIT",
   "engines": {
