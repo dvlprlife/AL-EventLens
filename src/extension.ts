@@ -7,6 +7,7 @@ import { registerSaveWatcher } from './index/watcher';
 import { buildIndex, type EventIndex } from './index/indexer';
 import { EventIndexStore } from './index/store';
 import type { ObjectRef, Publisher } from './al/types';
+import { reviveRange } from './util/reviveLocation';
 
 export function activate(context: vscode.ExtensionContext): void {
   const store = new EventIndexStore();
@@ -47,7 +48,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // Args may arrive as a real vscode.Location (from CodeLens / Tree) or as
     // a plain {uri, range} bag (structured-cloned from a webview message).
     // Reconstruct both pieces so showTextDocument gets canonical instances.
-    const loc = args[0] as { uri: vscode.Uri; range: vscode.Range };
+    const loc = args[0] as { uri: vscode.Uri; range: unknown };
     const uri = vscode.Uri.from(loc.uri);
     // Subscribers parsed from a .app's bundled src/**/*.al carry a synthetic
     // `al-eventlens-app:` URI (see indexer.ts). VS Code can't open that
@@ -59,10 +60,9 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       return;
     }
-    const range = new vscode.Range(
-      loc.range.start.line, loc.range.start.character,
-      loc.range.end.line,   loc.range.end.character
-    );
+    // `reviveRange` tolerates {start,end} OR {_start,_end} OR a degenerate
+    // empty object — webview-postMessage strips Range's class getters.
+    const range = reviveRange(loc.range);
     void vscode.window.showTextDocument(uri, { selection: range });
   });
   register('alEventLens.exportMermaid',   (...args) => {

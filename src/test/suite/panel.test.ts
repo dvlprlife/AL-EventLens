@@ -282,6 +282,38 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
     }
   });
 
+  test('webview posting {type:"gotoSubscriber"} dispatches even when range arrives in the underscore-shape that postMessage actually produces', () => {
+    // Regression: structured-clone of vscode.Range over the webview boundary
+    // strips the public `start`/`end` getters and leaves only the internal
+    // `_start`/`_end` data slots. The handler used to read `loc.range.end.line`
+    // and crash with `Cannot read properties of undefined (reading 'line')`.
+    // Now the panel host just forwards whatever shape it received and the
+    // command itself revives via reviveRange — the dispatch must succeed.
+    patchCreate();
+    patchExecute();
+    const store = new EventIndexStore();
+    try {
+      openPanel(fakeContext, store);
+      const fake = createCalls[0];
+      const clonedLocation = {
+        uri: { scheme: 'file', authority: '', path: '/workspace/MySub.al', query: '', fragment: '' },
+        range: {
+          _start: { line: 12, character: 4 },
+          _end:   { line: 12, character: 4 }
+        }
+      };
+      fake.fireReceive({ type: 'gotoSubscriber', subscriber: { location: clonedLocation } });
+
+      const dispatched = executeCalls.find((c) => c.command === 'alEventLens.gotoSubscriber');
+      assert.ok(dispatched,
+        'gotoSubscriber must dispatch even when the cloned range has only _start/_end (no public getters)');
+      assert.strictEqual(dispatched!.args[0], clonedLocation,
+        'panel host must forward the cloned location verbatim — revival happens in the command body');
+    } finally {
+      store.dispose();
+    }
+  });
+
   test('postSelectToPanel after openPanel posts a {type:"select", publisher} message', () => {
     patchCreate();
     const store = new EventIndexStore();
