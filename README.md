@@ -6,7 +6,9 @@ AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscri
 
 ## Demo
 
-_Demo GIFs and screenshots coming soon._
+![Activity-bar tree and panel showing event publishers from the open workspace under the `(workspace)` bucket, with the right-hand detail pane rendering the selected publisher's procedure signature](images/demo/workspace-events.png)
+
+![Same panel listing events from `.alpackages` dependency apps — `Codeunit::"Sales-Post"` selected, its `OnAfterPostSalesDoc` signature in the detail pane, and the full `Base Application Microsoft` tree expanded on the left](images/demo/application-events.png)
 
 ## Features
 
