@@ -3,6 +3,7 @@ import { parseAl } from '../al/parser';
 import { collectTriggerOwners, synthesizeTriggerPublishers } from '../al/triggers';
 import { readApp, readAppMetadata } from '../symbols/appReader';
 import { parseSymbolReference } from '../symbols/detect';
+import { attributeToApp, discoverWorkspaceApps } from './appJson';
 import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
 import { resolveSubscribers } from './resolver';
 import type { AppMeta, ObjectRef, Publisher, Subscriber } from '../al/types';
@@ -12,8 +13,10 @@ import { compareVersions } from '../util/versions';
 export interface EventIndex {
   readonly publishers: ReadonlyArray<Publisher>;
   readonly subscribers: ReadonlyArray<Subscriber>;
-  /** Friendly-name metadata per dependency `appId`. Workspace publishers
-   *  contribute nothing; missing entries fall back to the GUID at display time. */
+  /** Friendly-name metadata per `appId` — both `.alpackages/*.app`
+   *  dependency packages and workspace AL projects (keyed by their
+   *  `app.json` `id`, flagged `isWorkspaceApp`). Missing entries fall back
+   *  to the GUID at display time. */
   readonly appMeta: ReadonlyMap<string, AppMeta>;
 }
 
@@ -50,26 +53,53 @@ export async function buildIndex(
   const triggerOwners = new Map<string, ObjectRef>();
   const decoder = new TextDecoder('utf-8');
 
+  // Discover the workspace's AL projects (one per `app.json`). Used to
+  // attribute each workspace `.al` file to its owning project (so the tree
+  // groups multi-root workspaces per project) and to skip any `.app` in
+  // `.alpackages` that is the compiled twin of an open workspace project.
+  const workspaceApps = await discoverWorkspaceApps();
+  // Workspace AL source is the source of truth for events (per CLAUDE.md) —
+  // an open project carries `[EventSubscriber]` data the compiled `.app`
+  // strips, so the workspace copy strictly supersedes the package.
+  const workspaceAppIds = new Set(workspaceApps.map((a) => a.appId.toLowerCase()));
+  for (const app of workspaceApps) {
+    if (app.name !== undefined || app.appPublisher !== undefined) {
+      appMeta.set(app.appId, {
+        appId: app.appId,
+        name: app.name,
+        appPublisher: app.appPublisher,
+        isWorkspaceApp: true
+      });
+    }
+  }
+
   // Pass 1: workspace AL source files.
   progress?.report({ message: 'Scanning workspace AL files' });
   const alUris = await vscode.workspace.findFiles('**/*.al', '**/node_modules/**');
   for (const uri of alUris) {
     const bytes = await vscode.workspace.fs.readFile(uri);
     const text = decoder.decode(bytes);
-    const parsed = parseAl(uri, text);
+    const appId = attributeToApp(uri, workspaceApps);
+    const parsed = parseAl(uri, text, appId);
     publishers.push(...parsed.publishers);
     subscribers.push(...parsed.subscribers);
     if (includeTriggerEvents) {
-      collectTriggerOwners(text, triggerOwners);
+      collectTriggerOwners(text, triggerOwners, appId);
     }
   }
 
   // Pass 2: .alpackages/*.app dependency packages.
   if (scanAlpackages) {
     const allAppUris = await vscode.workspace.findFiles('**/.alpackages/*.app');
-    const appUris = includeAllAppVersions
+    // Drop any `.app` that is the compiled twin of an open workspace project
+    // BEFORE version selection, so the skip holds for both
+    // `includeAllAppVersions` values and suppresses every version of the app.
+    const candidateAppUris = workspaceAppIds.size === 0
       ? allAppUris
-      : await selectHighestVersionPerAppId(allAppUris);
+      : await excludeWorkspaceApps(allAppUris, workspaceAppIds);
+    const appUris = includeAllAppVersions
+      ? candidateAppUris
+      : await selectHighestVersionPerAppId(candidateAppUris);
     progress?.report({
       message: `Scanning .alpackages (${appUris.length} package${appUris.length === 1 ? '' : 's'})`
     });
@@ -176,4 +206,42 @@ async function selectHighestVersionPerAppId(
     // cmp < 0: existing already higher, keep it.
   }
   return [...winners.values()].map((v) => v.uri);
+}
+
+/**
+ * Drop every `.app` URI whose manifest `appId` belongs to an AL project that
+ * is open in the workspace as `.al` source. Workspace source is authoritative
+ * (it carries `[EventSubscriber]` data `SymbolReference.json` strips at
+ * compile time, per CLAUDE.md), so skipping the compiled twin loses nothing
+ * and prevents the same app's events being indexed twice.
+ *
+ * `workspaceAppIds` is a set of **lowercased** GUIDs — GUID casing varies
+ * between `app.json` and `NavxManifest.xml`, so the comparison normalizes.
+ *
+ * Cheap-path: reads only `NavxManifest.xml` (via `readAppMetadata`), not the
+ * heavy `SymbolReference.json`. A per-file metadata-read failure does NOT
+ * drop the URI — the file is kept so the main `readApp` loop's existing
+ * try/catch reports it (preserving the "tolerates a corrupted .app"
+ * behavior and the test's warn-count expectations).
+ */
+async function excludeWorkspaceApps(
+  uris: ReadonlyArray<vscode.Uri>,
+  workspaceAppIds: ReadonlySet<string>
+): Promise<vscode.Uri[]> {
+  const kept: vscode.Uri[] = [];
+  for (const uri of uris) {
+    let meta: { appId: string };
+    try {
+      meta = await readAppMetadata(uri);
+    } catch (err) {
+      console.warn(`AL EventLens: failed to read metadata from ${uri.fsPath}: ${err}`);
+      kept.push(uri);
+      continue;
+    }
+    if (workspaceAppIds.has(meta.appId.toLowerCase())) {
+      continue;
+    }
+    kept.push(uri);
+  }
+  return kept;
 }

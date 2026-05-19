@@ -53,6 +53,14 @@ const SAMPLE_APP_SYMBOL_REFERENCE = JSON.stringify({
   ]
 });
 
+// An `app.json` whose `id` matches SAMPLE_APP_MANIFEST's `App Id` — so the
+// workspace project and the `.app` package describe the same app.
+const SAMPLE_APP_JSON = JSON.stringify({
+  id: '11111111-1111-1111-1111-111111111111',
+  name: 'Sample',
+  publisher: 'Test'
+});
+
 async function buildAppBytes(opts: {
   manifestXml?: string;
   symbolReferenceJson?: string;
@@ -84,6 +92,8 @@ interface Patches {
   includeAllAppVersions?: boolean;
   alFiles?: vscode.Uri[];
   appFiles?: vscode.Uri[];
+  /** URIs returned for the `**​/app.json` glob; their bytes come from `fs`. */
+  appJsonFiles?: vscode.Uri[];
   fs: FakeFs;
   /** Mtime returned by `stat` for any registered file (defaults to 1000). */
   mtime?: number;
@@ -114,6 +124,9 @@ function applyPatches(p: Patches): void {
       }
       if (pattern === '**/.alpackages/*.app') {
         return p.appFiles ?? [];
+      }
+      if (pattern === '**/app.json') {
+        return p.appJsonFiles ?? [];
       }
       return [];
     }
@@ -890,5 +903,419 @@ suite('index/indexer: buildIndex', () => {
     assert.strictEqual(events[0], 'OnFromA');
     const dupWarn = warnCalls.find((m) => m.includes('duplicate .app for appId'));
     assert.ok(dupWarn, `expected a "duplicate .app for appId" warning, got: ${JSON.stringify(warnCalls)}`);
+  });
+
+  // ─── #79: workspace ⇄ .alpackages double-counting ──────────────────────
+
+  test('workspace app wins: app present as both .al source and .app is indexed once', async () => {
+    // Workspace has the app's source (MyCodeunit.al) plus its app.json, whose
+    // `id` matches the `.app` manifest GUID. `.alpackages` carries the
+    // compiled `.app`. The `.app` must be skipped entirely.
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes();
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(SAMPLE_APP_JSON)],
+        [appUri.toString(), appBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      appJsonFiles: [appJsonUri],
+      fs
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const eventNames = idx.publishers.map((p) => p.eventName);
+    assert.ok(eventNames.includes('OnAfterFoo'), 'workspace publisher must be present');
+    assert.ok(!eventNames.includes('OnAppEvent'),
+      '.app-only publisher must be absent — the package was skipped');
+    // No publisher may carry the .app GUID as its owner appId: the .app
+    // never entered Pass 2, and the workspace source carries the same GUID
+    // on its own owner refs (project attribution), so check that no
+    // publisher came from the SKIPPED package — i.e. OnAppEvent's owner.
+    assert.ok(!idx.publishers.some((p) => p.eventName === 'OnAppEvent'),
+      'the skipped package contributed no publishers');
+    // Trigger publishers are not duplicated (none here — only a Codeunit).
+    assert.ok(!idx.publishers.some((p) => p.kind === 'trigger'));
+  });
+
+  test('workspace-wins skip holds with includeAllAppVersions: true (all versions suppressed)', async () => {
+    const APP_ID = '11111111-1111-1111-1111-111111111111';
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const v1Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_1.0.0.0.app');
+    const v2Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_2.0.0.0.app');
+    const v3Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_2.1.0.0.app');
+    const v1Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV1')
+    });
+    const v2Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV2')
+    });
+    const v3Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.1.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV3')
+    });
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [v1Uri, v2Uri, v3Uri],
+      appJsonFiles: [appJsonUri],
+      fs: { bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(SAMPLE_APP_JSON)],
+        [v1Uri.toString(), v1Bytes],
+        [v2Uri.toString(), v2Bytes],
+        [v3Uri.toString(), v3Bytes]
+      ]) },
+      includeTriggerEvents: false,
+      includeAllAppVersions: true
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const events = idx.publishers.map((p) => p.eventName);
+    assert.ok(!events.some((e) => ['OnV1', 'OnV2', 'OnV3'].includes(e)),
+      `every version of the workspace app must be suppressed; got ${JSON.stringify(events)}`);
+    assert.ok(events.includes('OnAfterFoo'), 'workspace publisher still present');
+  });
+
+  test('workspace-wins skip holds with includeAllAppVersions: false (all versions suppressed)', async () => {
+    const APP_ID = '11111111-1111-1111-1111-111111111111';
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const v1Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_1.0.0.0.app');
+    const v2Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_2.0.0.0.app');
+    const v3Uri = vscode.Uri.parse('file:///workspace/.alpackages/Sample_2.1.0.0.app');
+    const v1Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV1')
+    });
+    const v2Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV2')
+    });
+    const v3Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.1.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV3')
+    });
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [v1Uri, v2Uri, v3Uri],
+      appJsonFiles: [appJsonUri],
+      fs: { bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(SAMPLE_APP_JSON)],
+        [v1Uri.toString(), v1Bytes],
+        [v2Uri.toString(), v2Bytes],
+        [v3Uri.toString(), v3Bytes]
+      ]) },
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const events = idx.publishers.map((p) => p.eventName);
+    assert.ok(!events.some((e) => ['OnV1', 'OnV2', 'OnV3'].includes(e)),
+      `every version of the workspace app must be suppressed; got ${JSON.stringify(events)}`);
+    assert.ok(events.includes('OnAfterFoo'), 'workspace publisher still present');
+  });
+
+  test('dependency-only app is unchanged: a different app.json id leaves the .app indexed', async () => {
+    // Workspace app.json declares a DIFFERENT id from the `.app`'s GUID, so
+    // the `.app` is a genuine dependency and must still be indexed.
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const otherAppJson = JSON.stringify({
+      id: '99999999-9999-9999-9999-999999999999',
+      name: 'Other',
+      publisher: 'Test'
+    });
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes();
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(otherAppJson)],
+        [appUri.toString(), appBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      appJsonFiles: [appJsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    assert.ok(idx.publishers.some((p) => p.eventName === 'OnAppEvent'),
+      'a genuine dependency .app must still be indexed');
+  });
+
+  test('workspace-only app is unchanged: workspace publishers appear exactly once', async () => {
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(SAMPLE_APP_JSON)]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [],
+      appJsonFiles: [appJsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const onAfterFoo = idx.publishers.filter((p) => p.eventName === 'OnAfterFoo');
+    assert.strictEqual(onAfterFoo.length, 1, 'workspace publisher must appear exactly once');
+  });
+
+  test('GUID case mismatch still matches: a case-different app.json id still skips the .app', async () => {
+    // The workspace app.json uses an UPPERCASE GUID; the `.app` manifest
+    // uses lowercase. The lowercased-comparison normalization must still
+    // recognize them as the same app and skip the package.
+    const APP_ID_LOWER = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const APP_ID_UPPER = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE';
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const upperAppJson = JSON.stringify({ id: APP_ID_UPPER, name: 'Sample', publisher: 'Test' });
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID_LOWER, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID_LOWER, 'OnAppEvent')
+    });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(upperAppJson)],
+        [appUri.toString(), appBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      appJsonFiles: [appJsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    assert.ok(!idx.publishers.some((p) => p.eventName === 'OnAppEvent'),
+      'case-different GUID must still skip the .app — comparison is lowercased');
+  });
+
+  test('malformed app.json does not abort discovery: the valid app still skips its .app, one warn', async () => {
+    // One valid app.json (matches the .app) plus one whose bytes are not
+    // valid JSON. discoverWorkspaceApps must tolerate the bad file, warn
+    // once, and still skip the valid app's .app.
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const goodAppJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const badAppJsonUri = vscode.Uri.parse('file:///workspace/tooling/app.json');
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appBytes = await buildAppBytes();
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [goodAppJsonUri.toString(), encode(SAMPLE_APP_JSON)],
+        [badAppJsonUri.toString(), encode('{ this is not valid json')],
+        [appUri.toString(), appBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      appJsonFiles: [goodAppJsonUri, badAppJsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    assert.ok(!idx.publishers.some((p) => p.eventName === 'OnAppEvent'),
+      'the valid app.json must still cause its .app to be skipped');
+    assert.ok(idx.publishers.some((p) => p.eventName === 'OnAfterFoo'),
+      'workspace publisher still present');
+    const badWarn = warnCalls.filter((m) => m.includes('app.json'));
+    assert.strictEqual(badWarn.length, 1,
+      `exactly one warn must mention the bad app.json; got: ${JSON.stringify(warnCalls)}`);
+    assert.ok(badWarn[0].includes('app.json'));
+  });
+
+  // ─── #80: multi-root workspace project grouping ────────────────────────
+
+  test('multi-root attribution: each publisher carries its project appId, appMeta has both names', async () => {
+    const projAId = '11111111-1111-1111-1111-111111111111';
+    const projBId = '22222222-2222-2222-2222-222222222222';
+    const aCuUri = vscode.Uri.parse('file:///rootA/MyCodeunit.al');
+    const bCuUri = vscode.Uri.parse('file:///rootB/MyCodeunit.al');
+    const aJsonUri = vscode.Uri.parse('file:///rootA/app.json');
+    const bJsonUri = vscode.Uri.parse('file:///rootB/app.json');
+    const aJson = JSON.stringify({ id: projAId, name: 'Project Alpha', publisher: 'Acme' });
+    const bJson = JSON.stringify({ id: projBId, name: 'Project Beta', publisher: 'Acme' });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [aCuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [bCuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [aJsonUri.toString(), encode(aJson)],
+        [bJsonUri.toString(), encode(bJson)]
+      ])
+    };
+    applyPatches({
+      alFiles: [aCuUri, bCuUri],
+      appFiles: [],
+      appJsonFiles: [aJsonUri, bJsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const byApp = new Map<string | undefined, number>();
+    for (const p of idx.publishers) {
+      byApp.set(p.owner.appId, (byApp.get(p.owner.appId) ?? 0) + 1);
+    }
+    assert.strictEqual(byApp.get(projAId), 1, 'rootA publisher attributed to Project Alpha');
+    assert.strictEqual(byApp.get(projBId), 1, 'rootB publisher attributed to Project Beta');
+    assert.strictEqual(byApp.get(undefined), undefined, 'no publisher should be unattributed');
+    assert.strictEqual(idx.appMeta.get(projAId)?.name, 'Project Alpha');
+    assert.strictEqual(idx.appMeta.get(projBId)?.name, 'Project Beta');
+    assert.strictEqual(idx.appMeta.get(projAId)?.isWorkspaceApp, true);
+    assert.strictEqual(idx.appMeta.get(projBId)?.isWorkspaceApp, true);
+  });
+
+  test('loose-file fallback: an .al file under no app.json keeps owner.appId undefined', async () => {
+    const projId = '11111111-1111-1111-1111-111111111111';
+    const projCuUri = vscode.Uri.parse('file:///rootA/MyCodeunit.al');
+    const looseCuUri = vscode.Uri.parse('file:///loose/MyCodeunit.al');
+    const jsonUri = vscode.Uri.parse('file:///rootA/app.json');
+    const json = JSON.stringify({ id: projId, name: 'Project Alpha', publisher: 'Acme' });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [projCuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [looseCuUri.toString(), encode(SAMPLE_TABLE_AL)],
+        [jsonUri.toString(), encode(json)]
+      ])
+    };
+    applyPatches({
+      alFiles: [projCuUri, looseCuUri],
+      appFiles: [],
+      appJsonFiles: [jsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const projPub = idx.publishers.find((p) => p.eventName === 'OnAfterFoo');
+    assert.ok(projPub, 'project publisher present');
+    assert.strictEqual(projPub!.owner.appId, projId, 'project file attributed to its app');
+    // SAMPLE_TABLE_AL has no [IntegrationEvent], so the loose file
+    // contributes no parsed publisher — assert no publisher was misattributed.
+    assert.ok(idx.publishers.every((p) => p.owner.appId === projId),
+      'every publisher belongs to the one project; the loose file is under no app.json');
+  });
+
+  test('nearest-enclosing: a file under a nested project attributes to the inner app.json', async () => {
+    const outerId = '11111111-1111-1111-1111-111111111111';
+    const innerId = '22222222-2222-2222-2222-222222222222';
+    const outerJsonUri = vscode.Uri.parse('file:///root/app.json');
+    const innerJsonUri = vscode.Uri.parse('file:///root/sub/app.json');
+    const innerCuUri = vscode.Uri.parse('file:///root/sub/MyCodeunit.al');
+    const outerJson = JSON.stringify({ id: outerId, name: 'Outer', publisher: 'Acme' });
+    const innerJson = JSON.stringify({ id: innerId, name: 'Inner', publisher: 'Acme' });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [outerJsonUri.toString(), encode(outerJson)],
+        [innerJsonUri.toString(), encode(innerJson)],
+        [innerCuUri.toString(), encode(SAMPLE_CODEUNIT_AL)]
+      ])
+    };
+    applyPatches({
+      alFiles: [innerCuUri],
+      appFiles: [],
+      appJsonFiles: [outerJsonUri, innerJsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const pub = idx.publishers.find((p) => p.eventName === 'OnAfterFoo');
+    assert.ok(pub);
+    assert.strictEqual(pub!.owner.appId, innerId,
+      'a file under root/sub must attribute to the inner (nearest) app.json, not the outer');
+  });
+
+  test('trigger publishers carry the project appId in a multi-root workspace', async () => {
+    const projId = '11111111-1111-1111-1111-111111111111';
+    const jsonUri = vscode.Uri.parse('file:///rootA/app.json');
+    const tableUri = vscode.Uri.parse('file:///rootA/MyTable.al');
+    const json = JSON.stringify({ id: projId, name: 'Project Alpha', publisher: 'Acme' });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [jsonUri.toString(), encode(json)],
+        [tableUri.toString(), encode(SAMPLE_TABLE_AL)]
+      ])
+    };
+    applyPatches({
+      alFiles: [tableUri],
+      appFiles: [],
+      appJsonFiles: [jsonUri],
+      fs
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const triggers = idx.publishers.filter((p) => p.kind === 'trigger');
+    assert.strictEqual(triggers.length, 10, '10 trigger publishers for the Table');
+    assert.ok(triggers.every((p) => p.owner.appId === projId),
+      'every synthesized trigger from a project Table must carry the project appId');
+  });
+
+  test('resolver regression: a workspace subscriber stays resolved after gaining an owner.appId', async () => {
+    // SAMPLE_CODEUNIT_AL has an IntegrationEvent and a same-file subscriber.
+    // Attributing the file to a project gives the subscriber's owner an
+    // appId; resolution keys on target identity only, so it must still
+    // resolve.
+    const projId = '11111111-1111-1111-1111-111111111111';
+    const jsonUri = vscode.Uri.parse('file:///rootA/app.json');
+    const cuUri = vscode.Uri.parse('file:///rootA/MyCodeunit.al');
+    const json = JSON.stringify({ id: projId, name: 'Project Alpha', publisher: 'Acme' });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [jsonUri.toString(), encode(json)],
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [],
+      appJsonFiles: [jsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    assert.strictEqual(idx.subscribers.length, 1);
+    assert.strictEqual(idx.subscribers[0].resolved, true,
+      'subscriber must still resolve — resolution keys on target identity, not owner.appId');
+    assert.strictEqual(idx.subscribers[0].owner.appId, projId,
+      'the subscriber owner gained the project appId');
   });
 });
