@@ -181,6 +181,21 @@ suite('ui/panelHtml: renderPanelHtml', () => {
       'reveal handler must assign m.search into the search input');
   });
 
+  test('subscriber click handler attaches for resolved AND unresolved rows; no cursor:default override', () => {
+    // Regression: previously the click handler was nested inside the
+    // resolved branch, so clicking an unresolved subscriber did nothing
+    // even though its own source location is always valid for parsed
+    // subscribers (the `resolved` flag is about the TARGET publisher).
+    const html = renderPanelHtml('nonce123');
+    assert.ok(!/\.sub-list\s+li\.unresolved\s*\{\s*cursor:\s*default/.test(html),
+      'CSS must NOT override cursor to default on .sub-list li.unresolved — those rows are now clickable');
+    // Exactly one gotoSubscriber postMessage in the rendered JS — wired
+    // once for the row, not duplicated across resolved/unresolved branches.
+    const matches = html.match(/postMessage\(\{\s*type:\s*['"]gotoSubscriber['"]/g) ?? [];
+    assert.strictEqual(matches.length, 1,
+      `gotoSubscriber postMessage must be wired exactly once (outside the resolved/unresolved branch); got ${matches.length}`);
+  });
+
   test('embeds the AL-style identity-selector parser (`<kind>::<name>` / `<kind>::"name"`)', () => {
     const html = renderPanelHtml('nonce123');
     // The exact regex literal used to detect identity tokens — strong signal
