@@ -4,11 +4,15 @@ See event publishers and subscribers across your AL workspace, and the lines tha
 
 AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscriber]` declarations in your AL workspace and its `.alpackages` dependencies, then surfaces the resolved publisher → subscriber graph in a searchable panel, an activity-bar view, and inline CodeLens hints. No more grepping across apps to figure out who is listening to which event.
 
-## Demo
+## Screenshots
 
 ![Activity-bar tree and panel showing event publishers from the open workspace under the `(workspace)` bucket, with the right-hand detail pane rendering the selected publisher's procedure signature](images/demo/workspace-events.png)
 
+![Browsing the publisher list under the `(workspace)` bucket — workspace-defined events from user AL codeunits scroll past as the panel paginates](images/demo/subscribers-workspace.gif)
+
 ![Same panel listing events from `.alpackages` dependency apps — `Codeunit::"Sales-Post"` selected, its `OnAfterPostSalesDoc` signature in the detail pane, and the full `Base Application Microsoft` tree expanded on the left](images/demo/application-events.png)
+
+![Selecting a publisher in the list surfaces its subscribers in the right-hand detail pane with file paths and resolved (`✓`) badges — click a row to jump to the subscriber's source](images/demo/subscriber-filter.gif)
 
 ## Features
 
