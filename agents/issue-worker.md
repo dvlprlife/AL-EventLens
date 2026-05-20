@@ -65,13 +65,23 @@ Make all necessary changes to satisfy the acceptance criteria. Follow all rules 
 
 ## Step 6: Commit and Push
 
-Commit with a message that references the issue:
+Commit with a message that references the issue and ends with the repo's
+co-author trailers:
 ```
 git add <files>
 git commit -m "brief description of change
 
-Closes #{number}"
+Closes #{number}
+
+Co-authored-by: dvlprlife <dvlprlife@users.noreply.github.com>
+Co-authored-by: Claude Opus 4.7 <noreply@anthropic.com>"
 ```
+
+**Commit trailers:** AL-EventLens uses **both** `Co-authored-by` trailers,
+lowercase (`Co-authored-by:`, not the capitalized `Co-Authored-By:` default),
+as the last lines of the message body. Before committing, confirm the current
+convention with `git log -8 --format=%B` (`git log --oneline` hides trailers)
+and match it.
 
 Push the branch:
 ```
