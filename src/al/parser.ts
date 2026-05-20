@@ -30,14 +30,22 @@ const procedureRe =
  * and BC22+ (`Codeunit::"Name"`, `OnEvent` — bare identifier) subscriber
  * syntaxes. Recognizes `[IntegrationEvent]` and `[BusinessEvent]` attribute
  * forms with any of their parameter shapes.
+ *
+ * When `appId` is supplied (the workspace `app.json` GUID the file belongs
+ * to), it is stamped onto every object's `owner` ref so publishers and
+ * subscribers are attributed to their project. Subscriber `target` refs are
+ * never stamped — the target lives in some other, possibly unknown app.
+ * Callers that omit `appId` (e.g. the `.app` bundled-source pass) keep the
+ * previous `owner.appId === undefined` behavior.
  */
 export function parseAl(
   uri: vscode.Uri,
-  text: string
+  text: string,
+  appId?: string
 ): { publishers: Publisher[]; subscribers: Subscriber[] } {
   const cleaned = stripComments(text);
 
-  const objects = findObjects(cleaned);
+  const objects = findObjects(cleaned, appId);
   if (objects.length === 0) {
     return { publishers: [], subscribers: [] };
   }
@@ -92,7 +100,7 @@ interface ObjectBoundary {
   readonly startLine: number;
 }
 
-function findObjects(cleaned: string): ObjectBoundary[] {
+function findObjects(cleaned: string, appId?: string): ObjectBoundary[] {
   const out: ObjectBoundary[] = [];
   const lines = cleaned.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
@@ -112,7 +120,8 @@ function findObjects(cleaned: string): ObjectBoundary[] {
       ref: {
         kind,
         id: m[2] ? parseInt(m[2], 10) : undefined,
-        name
+        name,
+        appId
       },
       startLine: i
     });

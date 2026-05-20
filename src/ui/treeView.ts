@@ -6,13 +6,19 @@ import { EventIndexStore } from '../index/store';
 
 // ─── Tree node model ────────────────────────────────────────────────────
 
-/** Root-level grouping: one per source app (`(workspace)` for the
- *  workspace bucket). */
+/** Root-level grouping: one per source app. Workspace AL projects (each
+ *  `app.json`) and dependency `.alpackages/*.app` packages both get a node;
+ *  the literal `(workspace)` bucket survives only as the fallback for loose
+ *  `.al` files under no `app.json`. */
 interface AppNode {
   readonly kind: 'app';
   readonly appId: string;
   readonly label: string;
   readonly appPublisher: string;
+  /** True for a workspace AL project and for the loose-file `(workspace)`
+   *  fallback bucket; false for a `.alpackages/*.app` dependency package.
+   *  Drives the workspace-first sort and the `root-folder` icon. */
+  readonly isWorkspace: boolean;
   readonly publishers: ReadonlyArray<Publisher>;
 }
 
@@ -86,8 +92,12 @@ function iconIdForKind(kind: ObjectKind): string {
   }
 }
 
-/** Group publishers by `owner.appId`; `undefined` → `(workspace)` bucket.
- *  Resolves friendly names from `appMeta` when available. */
+/** Group publishers by `owner.appId`. A real `appId` buckets per app (a
+ *  workspace AL project or a dependency package); `undefined` falls back to
+ *  the literal `(workspace)` bucket for loose `.al` files under no
+ *  `app.json`. Friendly names come from `appMeta`; `appMeta.isWorkspaceApp`
+ *  marks an `appId` as a workspace project. Workspace projects sort before
+ *  dependency packages, case-insensitive alphabetical within each group. */
 function groupByApp(
   publishers: ReadonlyArray<Publisher>,
   appMeta: ReadonlyMap<string, AppMeta>
@@ -106,7 +116,14 @@ function groupByApp(
   const nodes: AppNode[] = [];
   for (const [appId, bucketPublishers] of buckets) {
     if (appId === WORKSPACE_BUCKET) {
-      nodes.push({ kind: 'app', appId, label: WORKSPACE_BUCKET, appPublisher: '', publishers: bucketPublishers });
+      nodes.push({
+        kind: 'app',
+        appId,
+        label: WORKSPACE_BUCKET,
+        appPublisher: '',
+        isWorkspace: true,
+        publishers: bucketPublishers
+      });
       continue;
     }
     const meta = appMeta.get(appId);
@@ -115,15 +132,14 @@ function groupByApp(
       appId,
       label: meta?.name ?? appId,
       appPublisher: meta?.appPublisher ?? '',
+      isWorkspace: meta?.isWorkspaceApp === true,
       publishers: bucketPublishers
     });
   }
   nodes.sort((a, b) => {
-    if (a.label === WORKSPACE_BUCKET) {
-      return b.label === WORKSPACE_BUCKET ? 0 : -1;
-    }
-    if (b.label === WORKSPACE_BUCKET) {
-      return 1;
+    // Workspace projects (and the loose-file fallback bucket) first.
+    if (a.isWorkspace !== b.isWorkspace) {
+      return a.isWorkspace ? -1 : 1;
     }
     return a.label.localeCompare(b.label, undefined, { sensitivity: 'accent' });
   });
@@ -245,6 +261,9 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
       if (node.appPublisher) {
         item.description = node.appPublisher;
       }
+      // The literal `(workspace)` fallback bucket has no real appId, so no
+      // tooltip. A named workspace project carries a GUID and gets one,
+      // same as a dependency package.
       if (node.appId !== WORKSPACE_BUCKET) {
         const tooltipLines: string[] = [];
         if (node.appPublisher) { tooltipLines.push(`${node.appPublisher} — ${node.label}`); }
@@ -252,7 +271,9 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
         tooltipLines.push(`appId: ${node.appId}`);
         item.tooltip = tooltipLines.join('\n');
       }
-      item.iconPath = new vscode.ThemeIcon('package');
+      // Workspace AL projects (and the loose-file fallback bucket) use the
+      // `root-folder` codicon; dependency packages keep `package`.
+      item.iconPath = new vscode.ThemeIcon(node.isWorkspace ? 'root-folder' : 'package');
       return item;
     }
     if (node.kind === 'kind') {

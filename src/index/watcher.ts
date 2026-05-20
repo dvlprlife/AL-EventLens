@@ -2,6 +2,7 @@ import * as vscode from 'vscode';
 import { parseAl } from '../al/parser';
 import { collectTriggerOwners, synthesizeTriggerPublishers } from '../al/triggers';
 import type { ObjectRef, Publisher } from '../al/types';
+import { attributeToApp, discoverWorkspaceApps } from './appJson';
 import type { EventIndexStore } from './store';
 
 /**
@@ -49,12 +50,19 @@ export async function handleSave(
   }
 
   const text = document.getText();
-  const parsed = parseAl(document.uri, text);
+  // Attribute the saved file to its workspace AL project so the re-parsed
+  // records keep the same `owner.appId` the full index assigned them — a
+  // multi-root project's saved file must not bounce into the `(workspace)`
+  // bucket. `store.updateFile` matches surviving records by URI, which is
+  // `appId`-independent, so the resolved `appId` simply rides along.
+  const workspaceApps = await discoverWorkspaceApps();
+  const appId = attributeToApp(document.uri, workspaceApps);
+  const parsed = parseAl(document.uri, text, appId);
 
   let triggers: Publisher[] = [];
   if (cfg.get<boolean>('includeTriggerEvents', true)) {
     const owners = new Map<string, ObjectRef>();
-    collectTriggerOwners(text, owners);
+    collectTriggerOwners(text, owners, appId);
     for (const owner of owners.values()) {
       // Tag every synthesized trigger publisher with the saved file's URI
       // so a subsequent save of the same file can replace (not duplicate)

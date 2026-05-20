@@ -526,7 +526,9 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       const [appNode] = provider.getChildren() as TreeNode[];
       const appIcon = provider.getTreeItem(appNode).iconPath;
       assert.ok(appIcon instanceof vscode.ThemeIcon, 'AppNode iconPath must be a ThemeIcon');
-      assert.strictEqual((appIcon as vscode.ThemeIcon).id, 'package');
+      // These publishers carry no appId, so they land in the loose-file
+      // `(workspace)` fallback bucket — which uses the `root-folder` icon.
+      assert.strictEqual((appIcon as vscode.ThemeIcon).id, 'root-folder');
 
       const kindNodes = provider.getChildren(appNode) as TreeNode[];
       const iconById = new Map<string, string>();
@@ -651,6 +653,167 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       assert.deepStrictEqual(item.command!.arguments, [
         { kind: 'codeunit', name: 'MyCu', appId: undefined }
       ]);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  // ─── Multi-root workspace project grouping (#80) ─────────────────────────
+
+  test('two workspace AL projects produce two AppNodes labeled from appMeta, before any dependency package', () => {
+    const store = new EventIndexStore();
+    try {
+      const projAId = '11111111-1111-1111-1111-111111111111';
+      const projBId = '22222222-2222-2222-2222-222222222222';
+      const depId   = '33333333-3333-3333-3333-333333333333';
+      const appMeta = new Map<string, AppMeta>([
+        [projAId, { appId: projAId, name: 'Project Alpha', appPublisher: 'Acme', isWorkspaceApp: true }],
+        [projBId, { appId: projBId, name: 'Project Beta',  appPublisher: 'Acme', isWorkspaceApp: true }],
+        // Dependency package — no isWorkspaceApp flag.
+        [depId,   { appId: depId,   name: 'Some Dependency', appPublisher: 'Microsoft' }]
+      ]);
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'B Cu', 'OnB', { appId: projBId }),
+          makePublisher('codeunit', 'A Cu', 'OnA', { appId: projAId }),
+          makePublisher('codeunit', 'Dep Cu', 'OnDep', { appId: depId })
+        ],
+        subscribers: [],
+        appMeta
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const roots = provider.getChildren() as TreeNode[];
+      const appRoots = roots as Array<Extract<TreeNode, { kind: 'app' }>>;
+      assert.strictEqual(appRoots.length, 3, 'two workspace projects + one dependency');
+      // Workspace projects first, alphabetical; dependency last.
+      assert.deepStrictEqual(
+        appRoots.map((n) => n.label),
+        ['Project Alpha', 'Project Beta', 'Some Dependency']
+      );
+      assert.strictEqual(appRoots[0].isWorkspace, true);
+      assert.strictEqual(appRoots[1].isWorkspace, true);
+      assert.strictEqual(appRoots[2].isWorkspace, false, 'dependency package is not a workspace app');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a workspace AppNode gets the root-folder icon; a dependency AppNode keeps package', () => {
+    const store = new EventIndexStore();
+    try {
+      const wsId  = '11111111-1111-1111-1111-111111111111';
+      const depId = '33333333-3333-3333-3333-333333333333';
+      const appMeta = new Map<string, AppMeta>([
+        [wsId,  { appId: wsId,  name: 'My Project', isWorkspaceApp: true }],
+        [depId, { appId: depId, name: 'A Dependency' }]
+      ]);
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'WsCu',  'OnWs',  { appId: wsId }),
+          makePublisher('codeunit', 'DepCu', 'OnDep', { appId: depId })
+        ],
+        subscribers: [],
+        appMeta
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const roots = provider.getChildren() as Array<Extract<TreeNode, { kind: 'app' }>>;
+      const iconById = new Map<string, string>();
+      for (const node of roots) {
+        const icon = provider.getTreeItem(node).iconPath as vscode.ThemeIcon;
+        iconById.set(node.label, icon.id);
+      }
+      assert.strictEqual(iconById.get('My Project'), 'root-folder');
+      assert.strictEqual(iconById.get('A Dependency'), 'package');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a named workspace project carries a tooltip with its appId', () => {
+    const store = new EventIndexStore();
+    try {
+      const wsId = '11111111-1111-1111-1111-111111111111';
+      const appMeta = new Map<string, AppMeta>([
+        [wsId, { appId: wsId, name: 'My Project', appPublisher: 'Acme', isWorkspaceApp: true }]
+      ]);
+      store.set({
+        publishers: [makePublisher('codeunit', 'WsCu', 'OnWs', { appId: wsId })],
+        subscribers: [],
+        appMeta
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const [appNode] = provider.getChildren() as TreeNode[];
+      const item = provider.getTreeItem(appNode);
+      assert.ok(typeof item.tooltip === 'string', 'named workspace project must have a tooltip');
+      assert.ok((item.tooltip as string).includes(`appId: ${wsId}`),
+        `tooltip should carry the project appId; got: ${item.tooltip}`);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('loose-file publisher (appId undefined) still yields the `(workspace)` fallback node, sorted among workspace apps', () => {
+    const store = new EventIndexStore();
+    try {
+      const wsId  = '11111111-1111-1111-1111-111111111111';
+      const depId = '33333333-3333-3333-3333-333333333333';
+      const appMeta = new Map<string, AppMeta>([
+        [wsId,  { appId: wsId,  name: 'Zeta Project', isWorkspaceApp: true }],
+        [depId, { appId: depId, name: 'A Dependency' }]
+      ]);
+      store.set({
+        publishers: [
+          makePublisher('codeunit', 'LooseCu', 'OnLoose'),                    // no appId
+          makePublisher('codeunit', 'WsCu',    'OnWs',  { appId: wsId }),
+          makePublisher('codeunit', 'DepCu',   'OnDep', { appId: depId })
+        ],
+        subscribers: [],
+        appMeta
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const roots = provider.getChildren() as Array<Extract<TreeNode, { kind: 'app' }>>;
+      assert.deepStrictEqual(roots.map((n) => n.label),
+        ['(workspace)', 'Zeta Project', 'A Dependency'],
+        'loose-file `(workspace)` bucket sorts among the workspace group, dependency last');
+      const looseBucket = roots.find((n) => n.label === '(workspace)')!;
+      assert.strictEqual(looseBucket.isWorkspace, true);
+      // The loose-file fallback bucket has no real appId → no tooltip.
+      assert.strictEqual(provider.getTreeItem(looseBucket).tooltip, undefined);
+
+      // End-to-end drill: App → Kind → Object → Event reaches the per-project leaf.
+      const zeta = roots.find((n) => n.label === 'Zeta Project')!;
+      const kinds = provider.getChildren(zeta) as TreeNode[];
+      const objects = provider.getChildren(kinds[0]) as TreeNode[];
+      const events = provider.getChildren(objects[0]) as TreeNode[];
+      assert.strictEqual(events.length, 1);
+      assert.strictEqual((events[0] as Extract<TreeNode, { kind: 'event' }>).publisher.eventName, 'OnWs');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('single-root: a lone workspace project shows its app.json name, not `(workspace)`', () => {
+    const store = new EventIndexStore();
+    try {
+      const wsId = '11111111-1111-1111-1111-111111111111';
+      const appMeta = new Map<string, AppMeta>([
+        [wsId, { appId: wsId, name: 'Solo Project', isWorkspaceApp: true }]
+      ]);
+      store.set({
+        publishers: [makePublisher('codeunit', 'Cu', 'OnX', { appId: wsId })],
+        subscribers: [],
+        appMeta
+      });
+
+      const provider = new EventTreeDataProvider(store);
+      const roots = provider.getChildren() as Array<Extract<TreeNode, { kind: 'app' }>>;
+      assert.strictEqual(roots.length, 1);
+      assert.strictEqual(roots[0].label, 'Solo Project',
+        'single-root workspace shows the app.json name instead of `(workspace)`');
     } finally {
       store.dispose();
     }

@@ -20,10 +20,11 @@ export type ObjectKind =
 export type EventKind = 'integration' | 'business' | 'trigger';
 
 /**
- * Friendly-name metadata for a dependency app discovered via
- * `.alpackages/*.app`. Populated from `NavxManifest.xml`'s `<App Name="..."
- * Publisher="..."` attributes. Both fields are optional — workspace
- * publishers contribute no metadata, and old/minimal `.app` packages may
+ * Friendly-name metadata for an app. For a dependency app this is populated
+ * from the `.alpackages/*.app` `NavxManifest.xml` `<App Name="..."
+ * Publisher="..."` attributes; for a workspace AL project it comes from the
+ * project's `app.json` `name` / `publisher` fields. `name` / `appPublisher`
+ * are optional — old/minimal `.app` packages and bare `app.json` files may
  * omit them. `appPublisher` is named explicitly (rather than `publisher`)
  * to avoid colliding with the AL EventLens domain concept of an *event
  * publisher*.
@@ -32,6 +33,10 @@ export interface AppMeta {
   readonly appId: string;
   readonly name?: string;
   readonly appPublisher?: string;
+  /** True when this entry describes a workspace AL project (sourced from an
+   *  `app.json`), as opposed to a `.alpackages/*.app` dependency package.
+   *  Drives the tree's workspace-first sort and `root-folder` icon. */
+  readonly isWorkspaceApp?: boolean;
 }
 
 /** Identifier for an AL object — the (kind, id, name) triple. */
@@ -41,7 +46,9 @@ export interface ObjectRef {
   readonly id?: number;
   /** Object name as declared in source. */
   readonly name: string;
-  /** Owning app id, when the object came from a packaged dependency. */
+  /** Owning app id — the `.app` GUID for a packaged dependency, or the
+   *  workspace `app.json` `id` for an object parsed from a workspace AL
+   *  project. `undefined` for a loose `.al` file under no `app.json`. */
   readonly appId?: string;
 }
 

@@ -3,6 +3,7 @@ import { parseAl } from '../al/parser';
 import { collectTriggerOwners, synthesizeTriggerPublishers } from '../al/triggers';
 import { readApp, readAppMetadata } from '../symbols/appReader';
 import { parseSymbolReference } from '../symbols/detect';
+import { attributeToApp, discoverWorkspaceApps } from './appJson';
 import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
 import { resolveSubscribers } from './resolver';
 import type { AppMeta, ObjectRef, Publisher, Subscriber } from '../al/types';
@@ -12,8 +13,10 @@ import { compareVersions } from '../util/versions';
 export interface EventIndex {
   readonly publishers: ReadonlyArray<Publisher>;
   readonly subscribers: ReadonlyArray<Subscriber>;
-  /** Friendly-name metadata per dependency `appId`. Workspace publishers
-   *  contribute nothing; missing entries fall back to the GUID at display time. */
+  /** Friendly-name metadata per `appId` — both `.alpackages/*.app`
+   *  dependency packages and workspace AL projects (keyed by their
+   *  `app.json` `id`, flagged `isWorkspaceApp`). Missing entries fall back
+   *  to the GUID at display time. */
   readonly appMeta: ReadonlyMap<string, AppMeta>;
 }
 
@@ -50,26 +53,63 @@ export async function buildIndex(
   const triggerOwners = new Map<string, ObjectRef>();
   const decoder = new TextDecoder('utf-8');
 
+  // Discover the workspace's AL projects (one per `app.json`). Used to
+  // attribute each workspace `.al` file to its owning project (so the tree
+  // groups multi-root workspaces per project) and to skip any `.app` in
+  // `.alpackages` that is the compiled twin of an open workspace project.
+  const workspaceApps = await discoverWorkspaceApps();
+  // Workspace AL source is the source of truth for events (per CLAUDE.md) —
+  // an open project carries `[EventSubscriber]` data the compiled `.app`
+  // strips, so the workspace copy strictly supersedes the package.
+  const workspaceAppIds = new Set(workspaceApps.map((a) => a.appId.toLowerCase()));
+  // Register every workspace project in `appMeta` — even an `app.json` with
+  // no `name`/`publisher` — so `groupByApp` can always read `isWorkspaceApp`
+  // (it drives the tree's workspace-first sort and `root-folder` icon). A
+  // missing `name` simply falls back to the GUID label at display time.
+  for (const app of workspaceApps) {
+    appMeta.set(app.appId, {
+      appId: app.appId,
+      name: app.name,
+      appPublisher: app.appPublisher,
+      isWorkspaceApp: true
+    });
+  }
+
   // Pass 1: workspace AL source files.
   progress?.report({ message: 'Scanning workspace AL files' });
   const alUris = await vscode.workspace.findFiles('**/*.al', '**/node_modules/**');
   for (const uri of alUris) {
     const bytes = await vscode.workspace.fs.readFile(uri);
     const text = decoder.decode(bytes);
-    const parsed = parseAl(uri, text);
+    const appId = attributeToApp(uri, workspaceApps);
+    const parsed = parseAl(uri, text, appId);
     publishers.push(...parsed.publishers);
     subscribers.push(...parsed.subscribers);
     if (includeTriggerEvents) {
-      collectTriggerOwners(text, triggerOwners);
+      collectTriggerOwners(text, triggerOwners, appId);
     }
   }
 
   // Pass 2: .alpackages/*.app dependency packages.
   if (scanAlpackages) {
     const allAppUris = await vscode.workspace.findFiles('**/.alpackages/*.app');
-    const appUris = includeAllAppVersions
+    // Read each package's NavxManifest.xml once (cheap path — no
+    // SymbolReference decompression). Both steps below consult this single
+    // map, so no `.app` is metadata-read twice. Skip the reads entirely when
+    // neither step needs them: no workspace twins to exclude AND every
+    // version is being kept.
+    const metaByUri = workspaceAppIds.size > 0 || !includeAllAppVersions
+      ? await readAppMetadataMap(allAppUris)
+      : new Map<string, AppMetadata>();
+    // Drop any `.app` that is the compiled twin of an open workspace project
+    // BEFORE version selection, so the skip holds for both
+    // `includeAllAppVersions` values and suppresses every version of the app.
+    const candidateAppUris = workspaceAppIds.size === 0
       ? allAppUris
-      : await selectHighestVersionPerAppId(allAppUris);
+      : excludeWorkspaceApps(allAppUris, workspaceAppIds, metaByUri);
+    const appUris = includeAllAppVersions
+      ? candidateAppUris
+      : selectHighestVersionPerAppId(candidateAppUris, metaByUri);
     progress?.report({
       message: `Scanning .alpackages (${appUris.length} package${appUris.length === 1 ? '' : 's'})`
     });
@@ -131,32 +171,88 @@ export async function buildIndex(
   return { publishers, subscribers: resolved, appMeta };
 }
 
+/** Manifest metadata for one `.alpackages/*.app` package. */
+interface AppMetadata {
+  readonly appId: string;
+  readonly version: string;
+}
+
+/**
+ * Read the `NavxManifest.xml` metadata (`appId`, `version`) for every `.app`
+ * URI once, into a map keyed by `uri.toString()`. Cheap path — reads only the
+ * manifest, never `SymbolReference.json` or bundled `src/**`, so a package
+ * dropped by the steps below never pays the full-parse cost.
+ *
+ * A per-file read failure is `console.warn`-ed once and the URI left absent
+ * from the map; the two consumers decide what an absent entry means
+ * (`excludeWorkspaceApps` keeps it, `selectHighestVersionPerAppId` drops it).
+ */
+async function readAppMetadataMap(
+  uris: ReadonlyArray<vscode.Uri>
+): Promise<Map<string, AppMetadata>> {
+  const out = new Map<string, AppMetadata>();
+  for (const uri of uris) {
+    try {
+      out.set(uri.toString(), await readAppMetadata(uri));
+    } catch (err) {
+      console.warn(`AL EventLens: failed to read metadata from ${uri.fsPath}: ${err}`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Drop every `.app` URI whose manifest `appId` belongs to an AL project that
+ * is open in the workspace as `.al` source. Workspace source is authoritative
+ * (it carries `[EventSubscriber]` data `SymbolReference.json` strips at
+ * compile time, per CLAUDE.md), so skipping the compiled twin loses nothing
+ * and prevents the same app's events being indexed twice.
+ *
+ * Pure over the pre-read `metaByUri` map (see `readAppMetadataMap`) — no I/O.
+ * `workspaceAppIds` is a set of **lowercased** GUIDs, since GUID casing varies
+ * between `app.json` and `NavxManifest.xml`. A URI absent from `metaByUri`
+ * (its metadata read failed) is **kept**, so the main `readApp` loop's
+ * existing try/catch still reports it rather than it being silently dropped.
+ */
+function excludeWorkspaceApps(
+  uris: ReadonlyArray<vscode.Uri>,
+  workspaceAppIds: ReadonlySet<string>,
+  metaByUri: ReadonlyMap<string, AppMetadata>
+): vscode.Uri[] {
+  const kept: vscode.Uri[] = [];
+  for (const uri of uris) {
+    const meta = metaByUri.get(uri.toString());
+    if (meta && workspaceAppIds.has(meta.appId.toLowerCase())) {
+      continue;
+    }
+    kept.push(uri);
+  }
+  return kept;
+}
+
 /**
  * Group `.app` URIs by their manifest `appId` and return only the
- * highest-`Version` URI per group. Cheap-path: reads only `NavxManifest.xml`
- * (via `readAppMetadata`), not `SymbolReference.json` or bundled `src/**`,
- * so losers don't pay the full-parse cost.
+ * highest-`Version` URI per group.
+ *
+ * Pure over the pre-read `metaByUri` map (see `readAppMetadataMap`) — no I/O.
+ * A URI absent from `metaByUri` had its metadata read fail earlier (already
+ * warned) and is dropped.
  *
  * Tie-break: when two `.app` files share the same `appId` AND identical
  * `Version`, pick deterministically (first URI by `toString()` order) and
  * `console.warn` the collision so the user can clean up the folder.
- *
- * Per-file metadata-read failures are tolerated the same way the main
- * `readApp` loop tolerates parse failures — `console.warn` + continue, so a
- * single bad `.app` cannot abort the dedupe pass.
  */
-async function selectHighestVersionPerAppId(
-  uris: ReadonlyArray<vscode.Uri>
-): Promise<vscode.Uri[]> {
+function selectHighestVersionPerAppId(
+  uris: ReadonlyArray<vscode.Uri>,
+  metaByUri: ReadonlyMap<string, AppMetadata>
+): vscode.Uri[] {
   const winners = new Map<string, { uri: vscode.Uri; version: string }>();
   // Deterministic order so ties resolve the same way every run.
   const sortedUris = [...uris].sort((a, b) => a.toString().localeCompare(b.toString()));
   for (const uri of sortedUris) {
-    let meta: { appId: string; version: string };
-    try {
-      meta = await readAppMetadata(uri);
-    } catch (err) {
-      console.warn(`AL EventLens: failed to read metadata from ${uri.fsPath}: ${err}`);
+    const meta = metaByUri.get(uri.toString());
+    if (!meta) {
+      // Metadata read failed earlier (already warned) — drop the URI.
       continue;
     }
     const existing = winners.get(meta.appId);
