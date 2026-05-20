@@ -935,12 +935,11 @@ suite('index/indexer: buildIndex', () => {
     assert.ok(eventNames.includes('OnAfterFoo'), 'workspace publisher must be present');
     assert.ok(!eventNames.includes('OnAppEvent'),
       '.app-only publisher must be absent — the package was skipped');
-    // No publisher may carry the .app GUID as its owner appId: the .app
-    // never entered Pass 2, and the workspace source carries the same GUID
-    // on its own owner refs (project attribution), so check that no
-    // publisher came from the SKIPPED package — i.e. OnAppEvent's owner.
-    assert.ok(!idx.publishers.some((p) => p.eventName === 'OnAppEvent'),
-      'the skipped package contributed no publishers');
+    // The surviving publisher is the workspace source, attributed to the
+    // workspace project via its app.json id — not the skipped package.
+    const wsPub = idx.publishers.find((p) => p.eventName === 'OnAfterFoo');
+    assert.strictEqual(wsPub!.owner.appId, '11111111-1111-1111-1111-111111111111',
+      'workspace publisher is attributed to its app.json project');
     // Trigger publishers are not duplicated (none here — only a Codeunit).
     assert.ok(!idx.publishers.some((p) => p.kind === 'trigger'));
   });
