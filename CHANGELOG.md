@@ -4,6 +4,8 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-05-20
+
 ### Fixed
 
 - An app open in the workspace as `.al` source was also indexed a second time from its compiled `.app` in `.alpackages`, doubling every one of its publishers, subscribers, and synthesized trigger owners — subscriber-count badges and CodeLens counts were inflated for any app present on both the workspace and the package axis (`src/index/indexer.ts`, `src/index/appJson.ts`, `src/al/parser.ts`). This is distinct from the multi-version dedupe in 0.1.2, which deduped `.app` files *within* `.alpackages`; this bug was on the workspace ⇄ package axis. `buildIndex` now discovers every workspace project's `app.json` up front and, before version selection, drops any `.alpackages/*.app` whose manifest `appId` matches an open workspace project. Workspace `.al` source is authoritative — it carries `[EventSubscriber]` data that `SymbolReference.json` strips at compile time (per CLAUDE.md) — so skipping the compiled twin loses nothing. The skip applies regardless of `alEventLens.includeAllAppVersions` (all versions of a workspace app are suppressed) and the `appId` comparison is case-insensitive since GUID casing varies between `app.json` and `NavxManifest.xml`. A dependency-only `.app` and a workspace-only project are both unchanged.
