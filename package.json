@@ -2,7 +2,7 @@
   "name": "al-eventlens",
   "displayName": "AL EventLens",
   "description": "See event publishers and subscribers across your AL / Microsoft Dynamics 365 Business Central workspace, and the lines that connect them.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "dvlprlife",
   "license": "MIT",
   "engines": {
