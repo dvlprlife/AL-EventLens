@@ -1207,7 +1207,7 @@ suite('index/indexer: buildIndex', () => {
     const fs: FakeFs = {
       bytes: new Map([
         [projCuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
-        [looseCuUri.toString(), encode(SAMPLE_TABLE_AL)],
+        [looseCuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
         [jsonUri.toString(), encode(json)]
       ])
     };
@@ -1221,13 +1221,44 @@ suite('index/indexer: buildIndex', () => {
 
     const idx = await buildIndex(fakeContext());
 
-    const projPub = idx.publishers.find((p) => p.eventName === 'OnAfterFoo');
-    assert.ok(projPub, 'project publisher present');
-    assert.strictEqual(projPub!.owner.appId, projId, 'project file attributed to its app');
-    // SAMPLE_TABLE_AL has no [IntegrationEvent], so the loose file
-    // contributes no parsed publisher — assert no publisher was misattributed.
-    assert.ok(idx.publishers.every((p) => p.owner.appId === projId),
-      'every publisher belongs to the one project; the loose file is under no app.json');
+    // Both files declare OnAfterFoo. The copy under rootA/app.json is
+    // attributed to the project; the copy under /loose (no enclosing
+    // app.json) keeps an undefined owner.appId.
+    const projPubs = idx.publishers.filter((p) => p.owner.appId === projId);
+    const loosePubs = idx.publishers.filter((p) => p.owner.appId === undefined);
+    assert.strictEqual(projPubs.length, 1, 'the project file is attributed to its app.json');
+    assert.strictEqual(loosePubs.length, 1,
+      'the loose file under no app.json keeps owner.appId undefined');
+    assert.strictEqual(projPubs[0].eventName, 'OnAfterFoo');
+    assert.strictEqual(loosePubs[0].eventName, 'OnAfterFoo');
+  });
+
+  test('a workspace app.json with no name/publisher is still flagged isWorkspaceApp', async () => {
+    // An app.json carrying only an `id` (no name/publisher) must still
+    // register in appMeta with isWorkspaceApp:true — otherwise groupByApp
+    // would mis-sort and mis-icon the project as a dependency package.
+    const projId = '11111111-1111-1111-1111-111111111111';
+    const cuUri = vscode.Uri.parse('file:///rootA/MyCodeunit.al');
+    const jsonUri = vscode.Uri.parse('file:///rootA/app.json');
+    const json = JSON.stringify({ id: projId });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [jsonUri.toString(), encode(json)]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [],
+      appJsonFiles: [jsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    assert.strictEqual(idx.appMeta.get(projId)?.isWorkspaceApp, true,
+      'a name-less workspace app.json must still be flagged isWorkspaceApp');
   });
 
   test('nearest-enclosing: a file under a nested project attributes to the inner app.json', async () => {

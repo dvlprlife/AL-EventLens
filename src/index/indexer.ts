@@ -62,15 +62,17 @@ export async function buildIndex(
   // an open project carries `[EventSubscriber]` data the compiled `.app`
   // strips, so the workspace copy strictly supersedes the package.
   const workspaceAppIds = new Set(workspaceApps.map((a) => a.appId.toLowerCase()));
+  // Register every workspace project in `appMeta` — even an `app.json` with
+  // no `name`/`publisher` — so `groupByApp` can always read `isWorkspaceApp`
+  // (it drives the tree's workspace-first sort and `root-folder` icon). A
+  // missing `name` simply falls back to the GUID label at display time.
   for (const app of workspaceApps) {
-    if (app.name !== undefined || app.appPublisher !== undefined) {
-      appMeta.set(app.appId, {
-        appId: app.appId,
-        name: app.name,
-        appPublisher: app.appPublisher,
-        isWorkspaceApp: true
-      });
-    }
+    appMeta.set(app.appId, {
+      appId: app.appId,
+      name: app.name,
+      appPublisher: app.appPublisher,
+      isWorkspaceApp: true
+    });
   }
 
   // Pass 1: workspace AL source files.
