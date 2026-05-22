@@ -8,6 +8,7 @@ import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
 import { resolveSubscribers } from './resolver';
 import type { AppMeta, ObjectRef, Publisher, Subscriber } from '../al/types';
 import { compareVersions } from '../util/versions';
+import { mapLimit } from '../util/concurrency';
 
 /** A fully built, resolved event index for one workspace session. */
 export interface EventIndex {
@@ -18,6 +19,19 @@ export interface EventIndex {
    *  `app.json` `id`, flagged `isWorkspaceApp`). Missing entries fall back
    *  to the GUID at display time. */
   readonly appMeta: ReadonlyMap<string, AppMeta>;
+}
+
+/** Max file reads in flight at once during `buildIndex` (see `mapLimit`). */
+const READ_CONCURRENCY = 16;
+
+/** One `.alpackages/*.app`'s parsed contribution — produced in parallel by
+ *  the Pass-2 worker, merged into the index sequentially afterwards. */
+interface AppResult {
+  readonly appId: string;
+  readonly appName: string | undefined;
+  readonly appPublisher: string | undefined;
+  readonly appPublishers: Publisher[];
+  readonly bundled: ReadonlyArray<{ readonly subscribers: Subscriber[]; readonly text: string }>;
 }
 
 /**
@@ -78,9 +92,13 @@ export async function buildIndex(
   // Pass 1: workspace AL source files.
   progress?.report({ message: 'Scanning workspace AL files' });
   const alUris = await vscode.workspace.findFiles('**/*.al', '**/node_modules/**');
-  for (const uri of alUris) {
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    const text = decoder.decode(bytes);
+  // Read in parallel (bounded), then parse + merge sequentially below — so
+  // the resulting index is identical regardless of read-completion order.
+  const alFiles = await mapLimit(alUris, READ_CONCURRENCY, async (uri) => ({
+    uri,
+    text: decoder.decode(await vscode.workspace.fs.readFile(uri))
+  }));
+  for (const { uri, text } of alFiles) {
     const appId = attributeToApp(uri, workspaceApps);
     const parsed = parseAl(uri, text, appId);
     publishers.push(...parsed.publishers);
@@ -113,7 +131,11 @@ export async function buildIndex(
     progress?.report({
       message: `Scanning .alpackages (${appUris.length} package${appUris.length === 1 ? '' : 's'})`
     });
-    for (const uri of appUris) {
+    // Read + parse each package in parallel (bounded). Each task owns its
+    // try/catch so one bad `.app` never aborts the index; the shared-state
+    // merge below runs sequentially in `appUris` order for a deterministic
+    // result.
+    const appResults = await mapLimit(appUris, READ_CONCURRENCY, async (uri): Promise<AppResult | undefined> => {
       try {
         const stat = await vscode.workspace.fs.stat(uri);
         const app = await readApp(uri);
@@ -133,32 +155,37 @@ export async function buildIndex(
           appPublisher = app.appPublisher;
           await storeCachedSymbols(context, key, appPublishers, { name: appName, appPublisher });
         }
-        if (appName !== undefined || appPublisher !== undefined) {
-          appMeta.set(app.appId, { appId: app.appId, name: appName, appPublisher });
-        }
-        publishers.push(...appPublishers);
         // Bundled sources are parsed only for subscribers and trigger
         // owners. Publishers from bundled source are deliberately NOT
         // pushed — `parseSymbolReference` above is authoritative for
         // publishers (per CLAUDE.md), and pushing both would duplicate
         // every event under any `.app` that ships its own `src/*.al`.
-        // Subscriber-side data is not cached because `vscode.Location`
-        // is not JSON-safe.
-        for (const src of app.bundledAlSources) {
+        // The appId is stamped on so bundled subscribers attribute to
+        // their package rather than the `(workspace)` bucket.
+        const bundled = app.bundledAlSources.map((src) => {
           const srcUri = vscode.Uri.parse(`al-eventlens-app:/${app.appId}/${src.path}`);
-          // Stamp the package appId onto the parsed objects so bundled-source
-          // subscribers attribute to their app — without it the Subscribers
-          // tree and panel bucket them under `(workspace)`. The workspace pass
-          // does the equivalent via `attributeToApp`.
-          const parsed = parseAl(srcUri, src.text, app.appId);
-          subscribers.push(...parsed.subscribers);
-          if (includeTriggerEvents) {
-            collectTriggerOwners(src.text, triggerOwners, app.appId);
-          }
-        }
+          return { subscribers: parseAl(srcUri, src.text, app.appId).subscribers, text: src.text };
+        });
+        return { appId: app.appId, appName, appPublisher, appPublishers, bundled };
       } catch (err) {
         console.warn(`AL EventLens: failed to read ${uri.fsPath}: ${err}`);
+        return undefined;
+      }
+    });
+    // Sequential merge — `appUris` order, so the index is deterministic.
+    for (const r of appResults) {
+      if (!r) {
         continue;
+      }
+      if (r.appName !== undefined || r.appPublisher !== undefined) {
+        appMeta.set(r.appId, { appId: r.appId, name: r.appName, appPublisher: r.appPublisher });
+      }
+      publishers.push(...r.appPublishers);
+      for (const b of r.bundled) {
+        subscribers.push(...b.subscribers);
+        if (includeTriggerEvents) {
+          collectTriggerOwners(b.text, triggerOwners, r.appId);
+        }
       }
     }
   }
@@ -194,12 +221,22 @@ interface AppMetadata {
 async function readAppMetadataMap(
   uris: ReadonlyArray<vscode.Uri>
 ): Promise<Map<string, AppMetadata>> {
+  const entries = await mapLimit(
+    uris,
+    READ_CONCURRENCY,
+    async (uri): Promise<readonly [string, AppMetadata] | undefined> => {
+      try {
+        return [uri.toString(), await readAppMetadata(uri)];
+      } catch (err) {
+        console.warn(`AL EventLens: failed to read metadata from ${uri.fsPath}: ${err}`);
+        return undefined;
+      }
+    }
+  );
   const out = new Map<string, AppMetadata>();
-  for (const uri of uris) {
-    try {
-      out.set(uri.toString(), await readAppMetadata(uri));
-    } catch (err) {
-      console.warn(`AL EventLens: failed to read metadata from ${uri.fsPath}: ${err}`);
+  for (const entry of entries) {
+    if (entry) {
+      out.set(entry[0], entry[1]);
     }
   }
   return out;
