@@ -8,6 +8,7 @@ import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
 import { resolveSubscribers } from './resolver';
 import type { AppMeta, ObjectRef, Publisher, Subscriber } from '../al/types';
 import { compareVersions } from '../util/versions';
+import { mapLimit } from '../util/concurrency';
 
 /** A fully built, resolved event index for one workspace session. */
 export interface EventIndex {
@@ -18,6 +19,27 @@ export interface EventIndex {
    *  `app.json` `id`, flagged `isWorkspaceApp`). Missing entries fall back
    *  to the GUID at display time. */
   readonly appMeta: ReadonlyMap<string, AppMeta>;
+}
+
+/** Max file reads in flight at once during `buildIndex` (see `mapLimit`). */
+const READ_CONCURRENCY = 16;
+
+/** One `.alpackages/*.app`'s parsed contribution — produced in parallel by
+ *  the Pass-2 worker, merged into the index sequentially afterwards. */
+interface AppResult {
+  readonly appId: string;
+  readonly appName: string | undefined;
+  readonly appPublisher: string | undefined;
+  readonly appPublishers: Publisher[];
+  readonly subscribers: Subscriber[];
+  readonly triggerOwners: ObjectRef[];
+}
+
+/** Reproduces `collectTriggerOwners`' dedup key (`appId|kind|name`, name
+ *  lower-cased) so trigger owners merged from a cache hit key identically
+ *  to those collected fresh from bundled source. */
+function triggerOwnerKey(owner: ObjectRef): string {
+  return `${owner.appId ?? '__workspace__'}|${owner.kind}|${owner.name.toLowerCase()}`;
 }
 
 /**
@@ -78,9 +100,13 @@ export async function buildIndex(
   // Pass 1: workspace AL source files.
   progress?.report({ message: 'Scanning workspace AL files' });
   const alUris = await vscode.workspace.findFiles('**/*.al', '**/node_modules/**');
-  for (const uri of alUris) {
-    const bytes = await vscode.workspace.fs.readFile(uri);
-    const text = decoder.decode(bytes);
+  // Read in parallel (bounded), then parse + merge sequentially below — so
+  // the resulting index is identical regardless of read-completion order.
+  const alFiles = await mapLimit(alUris, READ_CONCURRENCY, async (uri) => ({
+    uri,
+    text: decoder.decode(await vscode.workspace.fs.readFile(uri))
+  }));
+  for (const { uri, text } of alFiles) {
     const appId = attributeToApp(uri, workspaceApps);
     const parsed = parseAl(uri, text, appId);
     publishers.push(...parsed.publishers);
@@ -113,52 +139,80 @@ export async function buildIndex(
     progress?.report({
       message: `Scanning .alpackages (${appUris.length} package${appUris.length === 1 ? '' : 's'})`
     });
-    for (const uri of appUris) {
+    // Read + parse each package in parallel (bounded). Each task owns its
+    // try/catch so one bad `.app` never aborts the index; the shared-state
+    // merge below runs sequentially in `appUris` order for a deterministic
+    // result.
+    const appResults = await mapLimit(appUris, READ_CONCURRENCY, async (uri): Promise<AppResult | undefined> => {
       try {
         const stat = await vscode.workspace.fs.stat(uri);
-        const app = await readApp(uri);
-        const key: CacheKey = { appId: app.appId, version: app.version, mtime: stat.mtime };
+        // Cheap manifest-only read forms the cache key without decompressing
+        // SymbolReference.json or the bundled `src/**`.
+        const meta = await readAppMetadata(uri);
+        const key: CacheKey = { appId: meta.appId, version: meta.version, mtime: stat.mtime };
         const cached = await loadCachedSymbols(context, key);
-        let appPublishers: Publisher[];
-        let appName: string | undefined;
-        let appPublisher: string | undefined;
         if (cached) {
-          appPublishers = cached.publishers;
-          appName = cached.name;
-          appPublisher = cached.appPublisher;
-        } else {
-          progress?.report({ message: `Reading ${app.name ?? app.appId}` });
-          appPublishers = parseSymbolReference(app.symbolReferenceJson, app.appId);
-          appName = app.name;
-          appPublisher = app.appPublisher;
-          await storeCachedSymbols(context, key, appPublishers, { name: appName, appPublisher });
+          // Cache hit — reuse publishers, subscribers and trigger owners;
+          // skip the full `readApp` NAVX + PKZIP decompression entirely.
+          return {
+            appId: meta.appId,
+            appName: cached.name,
+            appPublisher: cached.appPublisher,
+            appPublishers: cached.publishers,
+            subscribers: cached.subscribers,
+            triggerOwners: cached.triggerOwners
+          };
         }
-        if (appName !== undefined || appPublisher !== undefined) {
-          appMeta.set(app.appId, { appId: app.appId, name: appName, appPublisher });
-        }
-        publishers.push(...appPublishers);
+        // Cache miss — full read + parse, then persist for next time.
+        const app = await readApp(uri);
+        progress?.report({ message: `Reading ${app.name ?? app.appId}` });
+        const appPublishers = parseSymbolReference(app.symbolReferenceJson, app.appId);
         // Bundled sources are parsed only for subscribers and trigger
         // owners. Publishers from bundled source are deliberately NOT
-        // pushed — `parseSymbolReference` above is authoritative for
-        // publishers (per CLAUDE.md), and pushing both would duplicate
-        // every event under any `.app` that ships its own `src/*.al`.
-        // Subscriber-side data is not cached because `vscode.Location`
-        // is not JSON-safe.
+        // pushed — `parseSymbolReference` above is authoritative (per
+        // CLAUDE.md). Trigger owners are collected unconditionally (not
+        // gated by includeTriggerEvents) so the cache entry stays correct
+        // whatever the setting is on a later run; final synthesis is gated.
+        const appSubscribers: Subscriber[] = [];
+        const ownerMap = new Map<string, ObjectRef>();
         for (const src of app.bundledAlSources) {
           const srcUri = vscode.Uri.parse(`al-eventlens-app:/${app.appId}/${src.path}`);
-          // Stamp the package appId onto the parsed objects so bundled-source
-          // subscribers attribute to their app — without it the Subscribers
-          // tree and panel bucket them under `(workspace)`. The workspace pass
-          // does the equivalent via `attributeToApp`.
-          const parsed = parseAl(srcUri, src.text, app.appId);
-          subscribers.push(...parsed.subscribers);
-          if (includeTriggerEvents) {
-            collectTriggerOwners(src.text, triggerOwners, app.appId);
-          }
+          appSubscribers.push(...parseAl(srcUri, src.text, app.appId).subscribers);
+          collectTriggerOwners(src.text, ownerMap, app.appId);
         }
+        const appTriggerOwners = [...ownerMap.values()];
+        await storeCachedSymbols(
+          context, key, appPublishers, appSubscribers, appTriggerOwners,
+          { name: app.name, appPublisher: app.appPublisher }
+        );
+        return {
+          appId: app.appId,
+          appName: app.name,
+          appPublisher: app.appPublisher,
+          appPublishers,
+          subscribers: appSubscribers,
+          triggerOwners: appTriggerOwners
+        };
       } catch (err) {
         console.warn(`AL EventLens: failed to read ${uri.fsPath}: ${err}`);
+        return undefined;
+      }
+    });
+    // Sequential merge — `appUris` order, so the index is deterministic.
+    for (const r of appResults) {
+      if (!r) {
         continue;
+      }
+      if (r.appName !== undefined || r.appPublisher !== undefined) {
+        appMeta.set(r.appId, { appId: r.appId, name: r.appName, appPublisher: r.appPublisher });
+      }
+      publishers.push(...r.appPublishers);
+      subscribers.push(...r.subscribers);
+      // Merge trigger owners into the global dedup map; `triggerOwnerKey`
+      // reproduces `collectTriggerOwners`' key so cache-hit and cache-miss
+      // results dedupe identically.
+      for (const owner of r.triggerOwners) {
+        triggerOwners.set(triggerOwnerKey(owner), owner);
       }
     }
   }
@@ -194,12 +248,22 @@ interface AppMetadata {
 async function readAppMetadataMap(
   uris: ReadonlyArray<vscode.Uri>
 ): Promise<Map<string, AppMetadata>> {
+  const entries = await mapLimit(
+    uris,
+    READ_CONCURRENCY,
+    async (uri): Promise<readonly [string, AppMetadata] | undefined> => {
+      try {
+        return [uri.toString(), await readAppMetadata(uri)];
+      } catch (err) {
+        console.warn(`AL EventLens: failed to read metadata from ${uri.fsPath}: ${err}`);
+        return undefined;
+      }
+    }
+  );
   const out = new Map<string, AppMetadata>();
-  for (const uri of uris) {
-    try {
-      out.set(uri.toString(), await readAppMetadata(uri));
-    } catch (err) {
-      console.warn(`AL EventLens: failed to read metadata from ${uri.fsPath}: ${err}`);
+  for (const entry of entries) {
+    if (entry) {
+      out.set(entry[0], entry[1]);
     }
   }
   return out;

@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import type { Publisher } from '../../al/types';
+import type { ObjectRef, Publisher, Subscriber } from '../../al/types';
 import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from '../../index/cache';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -20,6 +20,30 @@ function makePublisher(name: string, eventName: string): Publisher {
     eventName,
     kind: 'integration'
   };
+}
+
+function makeSubscriber(targetName: string, targetEvent: string): Subscriber {
+  return {
+    owner: { kind: 'codeunit', name: 'My Sub' },
+    target: { kind: 'codeunit', name: targetName },
+    targetEvent,
+    location: new vscode.Location(
+      vscode.Uri.parse('al-eventlens-app:/app/src/Sub.al'),
+      new vscode.Position(12, 4)
+    ),
+    resolved: true
+  };
+}
+
+// Adapter for the v5 storeCachedSymbols signature — most tests here only
+// exercise publishers, so subscribers / triggerOwners default to empty.
+function store(
+  context: vscode.ExtensionContext,
+  key: CacheKey,
+  publishers: Publisher[],
+  meta?: { name?: string; appPublisher?: string }
+): Promise<void> {
+  return storeCachedSymbols(context, key, publishers, [], [], meta);
 }
 
 async function rmrf(uri: vscode.Uri): Promise<void> {
@@ -77,7 +101,7 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
     const p1 = makePublisher('Sales-Post', 'OnAfterPostSalesDoc');
     const p2 = makePublisher('Sales-Post', 'OnBeforePostSalesDoc');
-    await storeCachedSymbols(ctx, key, [p1, p2]);
+    await store(ctx, key, [p1, p2]);
 
     const loaded = await loadCachedSymbols(ctx, key);
     assert.ok(loaded);
@@ -90,7 +114,7 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
 
   test('round-trip: friendly-name metadata (name, appPublisher) survives store/load', async () => {
     const key: CacheKey = { appId: 'meta-app', version: '1.0', mtime: 100 };
-    await storeCachedSymbols(ctx, key, [makePublisher('A', 'OnFoo')], {
+    await store(ctx, key, [makePublisher('A', 'OnFoo')], {
       name: 'Sample App',
       appPublisher: 'Acme Corp'
     });
@@ -175,7 +199,7 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
         { name: 'CommitIsSuppressed', typeText: 'Boolean', isVar: false }
       ]
     };
-    await storeCachedSymbols(ctx, key, [pub]);
+    await store(ctx, key, [pub]);
     const loaded = await loadCachedSymbols(ctx, key);
     assert.ok(loaded, 'cache must hit on round-trip');
     assert.deepStrictEqual(loaded!.publishers[0].parameters, [
@@ -188,7 +212,7 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
     // Distinguishes the "no signature info" case (undefined) from "no params"
     // (empty array). Both are valid; the cache must preserve the distinction.
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
-    await storeCachedSymbols(ctx, key, [makePublisher('A', 'OnFoo')]);
+    await store(ctx, key, [makePublisher('A', 'OnFoo')]);
     const loaded = await loadCachedSymbols(ctx, key);
     assert.ok(loaded);
     assert.strictEqual(loaded!.publishers[0].parameters, undefined);
@@ -196,7 +220,7 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
 
   test('mtime mismatch returns undefined', async () => {
     const stored: CacheKey = { appId: 'X', version: '1.0', mtime: 1000 };
-    await storeCachedSymbols(ctx, stored, [makePublisher('A', 'OnFoo')]);
+    await store(ctx, stored, [makePublisher('A', 'OnFoo')]);
 
     const stale: CacheKey = { appId: 'X', version: '1.0', mtime: 2000 };
     const result = await loadCachedSymbols(ctx, stale);
@@ -207,7 +231,7 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
     // Store with caching enabled (default).
     await setEnabled(true);
-    await storeCachedSymbols(ctx, key, [makePublisher('A', 'OnFoo')]);
+    await store(ctx, key, [makePublisher('A', 'OnFoo')]);
     // Sanity check: enabled load works.
     const enabledLoad = await loadCachedSymbols(ctx, key);
     assert.ok(enabledLoad);
@@ -221,7 +245,7 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
   test('settings gating: cache.enabled=false makes store a no-op', async () => {
     await setEnabled(false);
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
-    await storeCachedSymbols(ctx, key, [makePublisher('A', 'OnFoo')]);
+    await store(ctx, key, [makePublisher('A', 'OnFoo')]);
 
     // The symbols/ directory should either not exist or contain no
     // matching files. Both outcomes satisfy "nothing was written".
@@ -239,15 +263,15 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
 
   test('store cleans up older versions for the same appId but spares other appIds', async () => {
     // Populate two versions for appId X plus an unrelated appId Y.
-    await storeCachedSymbols(ctx, { appId: 'X', version: '1.0', mtime: 100 }, [
+    await store(ctx, { appId: 'X', version: '1.0', mtime: 100 }, [
       makePublisher('A', 'OnV1')
     ]);
-    await storeCachedSymbols(ctx, { appId: 'Y', version: '1.0', mtime: 100 }, [
+    await store(ctx, { appId: 'Y', version: '1.0', mtime: 100 }, [
       makePublisher('B', 'OnY')
     ]);
     // Now bump X to 2.0 — should leave exactly one X__*.json (the 2.0
     // one) and leave Y alone.
-    await storeCachedSymbols(ctx, { appId: 'X', version: '2.0', mtime: 200 }, [
+    await store(ctx, { appId: 'X', version: '2.0', mtime: 200 }, [
       makePublisher('A', 'OnV2')
     ]);
 
@@ -282,12 +306,54 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
       kind: 'integration',
       location: new vscode.Location(vscode.Uri.parse('file:///x.al'), new vscode.Position(0, 0))
     };
-    await storeCachedSymbols(ctx, key, [withLocation]);
+    await store(ctx, key, [withLocation]);
 
     const loaded = await loadCachedSymbols(ctx, key);
     assert.ok(loaded);
     assert.strictEqual(loaded!.publishers.length, 1);
     assert.ok(!('location' in loaded!.publishers[0]),
       `location must be stripped, got: ${JSON.stringify(loaded!.publishers[0])}`);
+  });
+
+  test('old (v4) cache payloads are silently ignored on load — v5 added subscribers and trigger owners', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`);
+    // v4 shape: publishers + meta, but no subscribers / triggerOwners.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 4,
+        publishers: [
+          { owner: { kind: 'codeunit', name: 'Old', appId: 'X' }, eventName: 'OnOld', kind: 'integration' }
+        ],
+        name: 'Sample',
+        appPublisher: 'Acme'
+      }))
+    );
+    const result = await loadCachedSymbols(ctx, key);
+    assert.strictEqual(result, undefined,
+      'v4 payloads must be treated as misses so the indexer re-parses and captures bundled subscribers');
+  });
+
+  test('round-trip: subscribers and trigger owners survive store/load (v5)', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const sub = makeSubscriber('Sales-Post', 'OnAfterPostSalesDoc');
+    const owner: ObjectRef = { kind: 'table', id: 18, name: 'Customer', appId: 'X' };
+    await storeCachedSymbols(ctx, key, [makePublisher('A', 'OnFoo')], [sub], [owner]);
+
+    const loaded = await loadCachedSymbols(ctx, key);
+    assert.ok(loaded);
+    assert.strictEqual(loaded!.subscribers.length, 1);
+    assert.deepStrictEqual(loaded!.subscribers[0].owner, sub.owner);
+    assert.deepStrictEqual(loaded!.subscribers[0].target, sub.target);
+    assert.strictEqual(loaded!.subscribers[0].targetEvent, 'OnAfterPostSalesDoc');
+    assert.strictEqual(loaded!.subscribers[0].location.uri.toString(), sub.location.uri.toString());
+    assert.strictEqual(loaded!.subscribers[0].location.range.start.line, 12);
+    assert.strictEqual(loaded!.subscribers[0].location.range.start.character, 4);
+    assert.strictEqual(loaded!.subscribers[0].resolved, false,
+      'resolved is recomputed globally by resolveSubscribers — the cache stores it as false');
+    assert.deepStrictEqual(loaded!.triggerOwners, [owner]);
   });
 });

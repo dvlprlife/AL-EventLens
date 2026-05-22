@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { Publisher } from '../al/types';
+import type { ObjectRef, Publisher, Subscriber } from '../al/types';
 
 /** Cache key for a single `.app` package. */
 export interface CacheKey {
@@ -9,10 +9,13 @@ export interface CacheKey {
   readonly mtime: number;
 }
 
-/** What `loadCachedSymbols` returns on a hit — the publisher list plus the
- *  friendly-name metadata that was persisted alongside it. */
+/** What `loadCachedSymbols` returns on a hit — the publisher list, the
+ *  bundled-source subscribers and trigger owners, plus the friendly-name
+ *  metadata, all persisted alongside each other. */
 export interface CachedAppData {
   readonly publishers: Publisher[];
+  readonly subscribers: Subscriber[];
+  readonly triggerOwners: ObjectRef[];
   readonly name?: string;
   readonly appPublisher?: string;
 }
@@ -21,17 +24,28 @@ const SYMBOLS_DIR = 'symbols';
 
 /** Bump whenever the on-disk shape changes. v2 added `name` / `appPublisher`
  *  alongside the previously-bare publisher array. v3 added per-publisher
- *  `parameters` (procedure signature) so the panel can render them without a
- *  re-parse. v4 has the same on-disk shape as v3 but invalidates entries
- *  written by the broken symbol-reference dispatcher that silently dropped
- *  publishers inside `Namespaces[]` (everything under a namespace in BC 24+
- *  packages — i.e. almost all of BaseApp). Older entries are silently
- *  treated as cache misses. */
-const SCHEMA_VERSION = 4;
+ *  `parameters` (procedure signature). v4 invalidated entries poisoned by the
+ *  namespace-walk bug that silently dropped publishers inside `Namespaces[]`.
+ *  v5 adds the bundled-source `subscribers` and `triggerOwners` so a cache
+ *  hit can reuse them and skip re-decompressing the `.app`. Older entries
+ *  are silently treated as cache misses. */
+const SCHEMA_VERSION = 5;
 
-interface CachedPayloadV4 {
-  readonly schemaVersion: 4;
+/** A subscriber as persisted on disk. `vscode.Location` is not JSON-safe, so
+ *  it is flattened to a URI string plus the start line/character; it revives
+ *  to a `vscode.Location` on load. */
+interface CachedSubscriber {
+  readonly owner: ObjectRef;
+  readonly target: ObjectRef;
+  readonly targetEvent: string;
+  readonly loc: { readonly uri: string; readonly line: number; readonly char: number };
+}
+
+interface CachedPayloadV5 {
+  readonly schemaVersion: 5;
   readonly publishers: Publisher[];
+  readonly subscribers: CachedSubscriber[];
+  readonly triggerOwners: ObjectRef[];
   readonly name?: string;
   readonly appPublisher?: string;
 }
@@ -63,9 +77,10 @@ function isCacheEnabled(): boolean {
 }
 
 /**
- * Load a cached publisher list (plus friendly-name metadata) for the
- * given key, or return undefined if the cache is cold or stale. Storage
- * lives under `extensionContext.globalStorageUri`.
+ * Load cached symbols (publishers, bundled-source subscribers and trigger
+ * owners, plus friendly-name metadata) for the given key, or return
+ * undefined if the cache is cold or stale. Storage lives under
+ * `extensionContext.globalStorageUri`.
  *
  * Returns `undefined` (never throws) for any of: caching disabled, file
  * missing, file unreadable, JSON malformed, payload shape unexpected, or
@@ -95,35 +110,56 @@ export async function loadCachedSymbols(
     typeof parsed !== 'object' ||
     parsed === null ||
     (parsed as { schemaVersion?: unknown }).schemaVersion !== SCHEMA_VERSION ||
-    !Array.isArray((parsed as { publishers?: unknown }).publishers)
+    !Array.isArray((parsed as { publishers?: unknown }).publishers) ||
+    !Array.isArray((parsed as { subscribers?: unknown }).subscribers) ||
+    !Array.isArray((parsed as { triggerOwners?: unknown }).triggerOwners)
   ) {
     return undefined;
   }
-  const payload = parsed as CachedPayloadV4;
-  // Cached records intentionally have no `vscode.Location` — see
-  // storeCachedSymbols. Cast is safe because every consumer treats
-  // `Publisher.location` as optional.
+  const payload = parsed as CachedPayloadV5;
+  // Cached publishers intentionally have no `vscode.Location` — see
+  // storeCachedSymbols. Cached subscribers revive their flattened `loc`
+  // back to a `vscode.Location`; `resolved` is recomputed globally by
+  // `resolveSubscribers` after the index is assembled, so the cached
+  // value is intentionally not persisted (stored as `false`).
+  const subscribers: Subscriber[] = payload.subscribers.map((s) => ({
+    owner: s.owner,
+    target: s.target,
+    targetEvent: s.targetEvent,
+    location: new vscode.Location(
+      vscode.Uri.parse(s.loc.uri),
+      new vscode.Position(s.loc.line, s.loc.char)
+    ),
+    resolved: false
+  }));
   return {
     publishers: payload.publishers,
+    subscribers,
+    triggerOwners: payload.triggerOwners,
     name: payload.name,
     appPublisher: payload.appPublisher
   };
 }
 
 /**
- * Persist a parsed publisher list (and the app's friendly-name metadata)
- * under the given key. Subsequent `loadCachedSymbols` calls with the same
- * `(appId, version, mtime)` triple will return the stored value.
+ * Persist a parsed package's symbols under the given key: its publishers,
+ * the subscribers and trigger owners discovered in its bundled `src/**`,
+ * and the app's friendly-name metadata. Subsequent `loadCachedSymbols`
+ * calls with the same `(appId, version, mtime)` triple return the stored
+ * value, letting the indexer skip re-reading the `.app` entirely.
  *
- * Strips `vscode.Location` before serializing — `.app` publishers never
- * carry one and the type isn't JSON-safe. Also cleans up any older cache
- * entries for the same `appId` so a version bump doesn't leave stale
- * files behind.
+ * Strips `vscode.Location` from publishers before serializing — `.app`
+ * publishers never carry one and the type isn't JSON-safe; subscribers
+ * keep their location, flattened to a JSON-safe `loc`. Also cleans up any
+ * older cache entries for the same `appId` so a version bump doesn't leave
+ * stale files behind.
  */
 export async function storeCachedSymbols(
   context: vscode.ExtensionContext,
   key: CacheKey,
   publishers: ReadonlyArray<Publisher>,
+  subscribers: ReadonlyArray<Subscriber>,
+  triggerOwners: ReadonlyArray<ObjectRef>,
   meta?: { name?: string; appPublisher?: string }
 ): Promise<void> {
   if (!isCacheEnabled()) {
@@ -169,9 +205,21 @@ export async function storeCachedSymbols(
     kind,
     ...(parameters !== undefined ? { parameters } : {})
   }));
-  const payload: CachedPayloadV4 = {
+  const cachedSubscribers: CachedSubscriber[] = subscribers.map((s) => ({
+    owner: s.owner,
+    target: s.target,
+    targetEvent: s.targetEvent,
+    loc: {
+      uri: s.location.uri.toString(),
+      line: s.location.range.start.line,
+      char: s.location.range.start.character
+    }
+  }));
+  const payload: CachedPayloadV5 = {
     schemaVersion: SCHEMA_VERSION,
     publishers: strippedPublishers as Publisher[],
+    subscribers: cachedSubscribers,
+    triggerOwners: [...triggerOwners],
     name: meta?.name,
     appPublisher: meta?.appPublisher
   };
