@@ -290,6 +290,8 @@ export class SubscriberTreeDataProvider implements vscode.TreeDataProvider<SubTr
 export function registerSubscriberTreeView(store: EventIndexStore): vscode.Disposable {
   const provider = new SubscriberTreeDataProvider(store);
   const view = vscode.window.createTreeView('alEventLensSubscribersView', { treeDataProvider: provider });
+  // Refresh on both a full re-index and an incremental file save.
   const sub = store.onDidChange(() => provider.refresh());
-  return vscode.Disposable.from(view, sub);
+  const fileSub = store.onDidUpdateFile(() => provider.refresh());
+  return vscode.Disposable.from(view, sub, fileSub);
 }
