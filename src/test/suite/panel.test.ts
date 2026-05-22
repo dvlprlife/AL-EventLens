@@ -260,6 +260,20 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     assert.ok(html.includes("addEventListener('input', debounce(render"),
       'the search input listener must be wrapped in debounce()');
   });
+
+  test('the panel lists are row-capped so a huge workspace cannot freeze the webview', () => {
+    // #87 — renderList/renderSubscriberList rebuild the whole DOM; an
+    // unbounded list at BaseApp scale froze the panel on open.
+    const html = renderPanelHtml('nonce123');
+    assert.ok(/const MAX_LIST_ROWS\s*=\s*\d+/.test(html),
+      'a MAX_LIST_ROWS cap constant must be defined');
+    assert.ok(html.includes('shown >= MAX_LIST_ROWS && k !== selectedKey'),
+      'renderList must stop appending past the cap, except the selected row');
+    assert.ok(html.includes('shown >= MAX_LIST_ROWS && k !== selectedSubKey'),
+      'renderSubscriberList must stop appending past the cap, except the selected row');
+    assert.ok(html.includes("'Showing ' + shown + ' of ' + total"),
+      'a capped list must append a notice row showing rendered-of-total counts');
+  });
 });
 
 suite('ui/panel: openPanel singleton + store wiring', () => {
