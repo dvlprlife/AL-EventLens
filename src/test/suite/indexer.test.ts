@@ -628,7 +628,7 @@ suite('index/indexer: buildIndex', () => {
         eventName: 'OnCachedMarker',
         kind: 'integration'
       }
-    ]);
+    ], [], []);
 
     applyPatches({
       alFiles: [],
@@ -710,7 +710,7 @@ suite('index/indexer: buildIndex', () => {
         eventName: 'OnCachedMarker',
         kind: 'integration'
       }
-    ]);
+    ], [], []);
 
     applyPatches({
       alFiles: [],
