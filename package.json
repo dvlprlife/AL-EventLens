@@ -28,7 +28,8 @@
   },
   "activationEvents": [
     "onLanguage:al",
-    "onView:alEventLensView"
+    "onView:alEventLensView",
+    "onView:alEventLensSubscribersView"
   ],
   "main": "./dist/extension.js",
   "browser": "./dist/web/extension.js",
@@ -47,6 +48,10 @@
         {
           "id": "alEventLensView",
           "name": "Publishers"
+        },
+        {
+          "id": "alEventLensSubscribersView",
+          "name": "Subscribers"
         }
       ]
     },
@@ -55,6 +60,7 @@
       { "command": "alEventLens.refresh",           "title": "Refresh Index",             "category": "AL EventLens" },
       { "command": "alEventLens.revealPublisher",   "title": "Reveal Publisher",          "category": "AL EventLens" },
       { "command": "alEventLens.revealObject",      "title": "Reveal Object",             "category": "AL EventLens" },
+      { "command": "alEventLens.revealSubscriber",  "title": "Reveal Subscriber",         "category": "AL EventLens" },
       { "command": "alEventLens.gotoSubscriber",    "title": "Go to Subscriber",          "category": "AL EventLens" },
       { "command": "alEventLens.exportMermaid",     "title": "Export to Mermaid",         "category": "AL EventLens" }
     ],

@@ -1,13 +1,14 @@
 import * as vscode from 'vscode';
-import { getSelectedPublisher, openPanel, postRevealObjectToPanel } from './ui/panel';
+import { getSelectedPublisher, openPanel, postRevealObjectToPanel, postRevealSubscriberToPanel } from './ui/panel';
 import { registerTreeView } from './ui/treeView';
+import { registerSubscriberTreeView } from './ui/subscriberTreeView';
 import { registerCodeLens } from './ui/codelens';
 import { runExportMermaid } from './commands/exportMermaid';
 import { registerSaveWatcher } from './index/watcher';
 import { registerWorkspaceFolderReindex } from './index/folderWatcher';
 import { runIndexWithProgress } from './index/reindex';
 import { EventIndexStore } from './index/store';
-import type { ObjectRef, Publisher } from './al/types';
+import type { ObjectRef, Publisher, Subscriber } from './al/types';
 import { reviveRange } from './util/reviveLocation';
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -38,6 +39,14 @@ export function activate(context: vscode.ExtensionContext): void {
     openPanel(context, store);
     postRevealObjectToPanel(owner);
   });
+  register('alEventLens.revealSubscriber', (...args) => {
+    if (!args[0]) { return; }
+    const subscriber = args[0] as Subscriber;
+    openPanel(context, store);
+    // Switches the panel to Subscribers mode and selects this subscriber,
+    // so it's in view rather than buried in the unfiltered list.
+    postRevealSubscriberToPanel(subscriber);
+  });
   register('alEventLens.gotoSubscriber',  (...args) => {
     if (!args[0]) { return; }
     // Args may arrive as a real vscode.Location (from CodeLens / Tree) or as
@@ -66,6 +75,7 @@ export function activate(context: vscode.ExtensionContext): void {
   });
 
   context.subscriptions.push(registerTreeView(store));
+  context.subscriptions.push(registerSubscriberTreeView(store));
   context.subscriptions.push(registerCodeLens(context, store));
   context.subscriptions.push(registerSaveWatcher(context, store));
   context.subscriptions.push(registerWorkspaceFolderReindex(context, store));

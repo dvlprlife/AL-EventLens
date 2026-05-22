@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Added
+
+- Subscribers section — a first-class view of every subscriber the workspace declares, **unresolved ones included** (`package.json`, `src/ui/subscriberTreeView.ts`, `src/ui/treeView.ts`, `src/ui/panel.ts`, `src/ui/panelHtml.ts`, `src/extension.ts`). Until now subscribers only appeared nested under a selected publisher, so a subscriber whose target app is missing from `.alpackages` — never matched to a publisher — was invisible in every surface. A second activity-bar tree (`alEventLensSubscribersView`, "Subscribers") now renders below "Publishers" and groups subscribers owning app → object kind → object → subscribed event, with a `✓` / `⚠` resolved badge per leaf. The webview panel gains a Publishers / Subscribers mode toggle; Subscribers mode lists every subscriber in a searchable flat list with a detail pane (owner, target, event, resolved status, jump-to-source). New command `alEventLens.revealSubscriber` and new `{type:'revealSubscriber', subscriber}` panel message — clicking a Subscribers-tree leaf opens the panel in Subscribers mode with that subscriber selected. `iconIdForKind` and `WORKSPACE_BUCKET` are now exported from `treeView.ts` so the subscriber tree reuses them rather than duplicating the icon map and workspace-bucket constant.
+
 ## [0.1.3] - 2026-05-20
 
 ### Fixed

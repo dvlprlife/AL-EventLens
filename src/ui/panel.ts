@@ -1,5 +1,5 @@
 import * as vscode from 'vscode';
-import type { ObjectRef, Publisher } from '../al/types';
+import type { ObjectRef, Publisher, Subscriber } from '../al/types';
 import { publisherKey } from '../index/match';
 import { EventIndexStore } from '../index/store';
 import { renderPanelHtml } from './panelHtml';
@@ -125,6 +125,22 @@ export function postRevealObjectToPanel(
     selectedPublisher = selectPublisher;
   }
   void activePanel.webview.postMessage({ type: 'reveal', search, selectKey });
+}
+
+/**
+ * Post a `{type:'revealSubscriber', subscriber}` message to the active
+ * panel, if any. Used by `alEventLens.revealSubscriber` after `openPanel`
+ * returns so the panel switches to Subscribers mode and selects the
+ * subscriber emitted by a Subscribers-tree leaf.
+ *
+ * The webview already receives the full `subscribers` array via the
+ * `index` message, so no extra data is sent — the webview matches this
+ * subscriber against that list by a clone-safe key.
+ */
+export function postRevealSubscriberToPanel(subscriber: Subscriber): void {
+  if (activePanel) {
+    void activePanel.webview.postMessage({ type: 'revealSubscriber', subscriber });
+  }
 }
 
 function buildObjectSearch(owner: Pick<ObjectRef, 'kind' | 'name'>): string {

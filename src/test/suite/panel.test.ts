@@ -3,7 +3,7 @@ import * as vscode from 'vscode';
 import type { Publisher, Subscriber } from '../../al/types';
 import type { EventIndex } from '../../index/indexer';
 import { EventIndexStore } from '../../index/store';
-import { getSelectedPublisher, openPanel, postRevealObjectToPanel, postSelectToPanel } from '../../ui/panel';
+import { getSelectedPublisher, openPanel, postRevealObjectToPanel, postRevealSubscriberToPanel, postSelectToPanel } from '../../ui/panel';
 import { renderPanelHtml } from '../../ui/panelHtml';
 
 // ─── Fake WebviewPanel ───────────────────────────────────────────────────
@@ -208,6 +208,37 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     // way to keep dropdown-driven and identity-driven filters consistent.
     assert.ok(/parsed\.objectIdentity\s*=\s*null/.test(html),
       'applyToken must clear objectIdentity when the kind dropdown changes');
+  });
+
+  test('embeds the Publishers/Subscribers mode toggle and a dedicated subscriber list', () => {
+    const html = renderPanelHtml('nonce123');
+    assert.ok(/id="modePublishers"/.test(html), 'mode toggle must include a Publishers button');
+    assert.ok(/id="modeSubscribers"/.test(html), 'mode toggle must include a Subscribers button');
+    assert.ok(/<ul id="subscribers"/.test(html),
+      'left pane must include a #subscribers list element');
+    assert.ok(html.includes('function renderSubscriberList()'),
+      'renderSubscriberList helper must be inlined for Subscribers mode');
+    assert.ok(html.includes('function passesSubscriberFilter('),
+      'passesSubscriberFilter must be inlined so the subscriber list is searchable');
+  });
+
+  test('the subscriber list is built from the full subscribers array — unresolved rows included', () => {
+    // The Subscribers mode iterates `subscribers` directly (not the
+    // publisher-keyed index), so an unresolved subscriber whose target app
+    // is missing still gets a row — the whole reason the section exists.
+    const html = renderPanelHtml('nonce123');
+    assert.ok(/subscribers\.forEach\(function \(s\) \{/.test(html),
+      'renderSubscriberList must iterate every subscriber, resolved or not');
+    assert.ok(html.includes("badge-warn"),
+      'unresolved rows must reuse the warning badge class');
+  });
+
+  test('embeds the revealSubscriber message handler so Subscribers-tree clicks drive the panel', () => {
+    const html = renderPanelHtml('nonce123');
+    assert.ok(/m\.type\s*===\s*['"]revealSubscriber['"]/.test(html),
+      "renderPanelHtml's message router must handle the 'revealSubscriber' message");
+    assert.ok(html.includes("setMode('subscribers')"),
+      'the revealSubscriber handler must switch the panel to Subscribers mode');
   });
 });
 
@@ -482,6 +513,36 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
     postRevealObjectToPanel({ kind: 'codeunit', name: 'X' });
     // Nothing to assert on a fake panel since one was never created; the test
     // passes if the call returns without throwing.
+    assert.ok(true);
+  });
+
+  test('postRevealSubscriberToPanel after openPanel posts a {type:"revealSubscriber", subscriber} message', () => {
+    patchCreate();
+    const store = new EventIndexStore();
+    try {
+      openPanel(fakeContext, store);
+      const fake = createCalls[0];
+      const before = fake.posts.length;
+
+      const sub = makeSubscriber('Sales-Post', 'OnAfterPostSalesDoc');
+      postRevealSubscriberToPanel(sub);
+
+      assert.strictEqual(fake.posts.length, before + 1,
+        'postRevealSubscriberToPanel must post exactly one message');
+      const last = fake.posts[fake.posts.length - 1] as {
+        type: string; subscriber: Subscriber;
+      };
+      assert.strictEqual(last.type, 'revealSubscriber');
+      assert.strictEqual(last.subscriber, sub,
+        'subscriber payload must be the exact object passed in');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('postRevealSubscriberToPanel: no-op when no panel is open', () => {
+    // No patchCreate / openPanel — activePanel stays undefined.
+    postRevealSubscriberToPanel(makeSubscriber('X', 'Y'));
     assert.ok(true);
   });
 });
