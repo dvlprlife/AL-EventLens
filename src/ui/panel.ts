@@ -47,14 +47,26 @@ export function openPanel(context: vscode.ExtensionContext, store: EventIndexSto
     appMeta: Array.from(initial.appMeta.entries())
   });
 
-  storeListener = store.onDidChange((idx) => {
-    void panel.webview.postMessage({
-      type: 'index',
-      publishers: idx.publishers,
-      subscribers: idx.subscribers,
-      appMeta: Array.from(idx.appMeta.entries())
-    });
-  });
+  storeListener = vscode.Disposable.from(
+    store.onDidChange((idx) => {
+      void panel.webview.postMessage({
+        type: 'index',
+        publishers: idx.publishers,
+        subscribers: idx.subscribers,
+        appMeta: Array.from(idx.appMeta.entries())
+      });
+    }),
+    // Incremental save: post just the saved file's publishers plus the
+    // (globally re-resolved) subscriber list — not the whole index.
+    store.onDidUpdateFile((u) => {
+      void panel.webview.postMessage({
+        type: 'fileUpdate',
+        uriPath: u.uri.path,
+        publishers: u.publishers,
+        subscribers: u.subscribers
+      });
+    })
+  );
 
   panel.webview.onDidReceiveMessage(
     (msg: {

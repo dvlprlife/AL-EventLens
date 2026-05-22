@@ -352,6 +352,8 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
 export function registerTreeView(store: EventIndexStore): vscode.Disposable {
   const provider = new EventTreeDataProvider(store);
   const view = vscode.window.createTreeView('alEventLensView', { treeDataProvider: provider });
+  // Refresh on both a full re-index and an incremental file save.
   const sub = store.onDidChange(() => provider.refresh());
-  return vscode.Disposable.from(view, sub);
+  const fileSub = store.onDidUpdateFile(() => provider.refresh());
+  return vscode.Disposable.from(view, sub, fileSub);
 }

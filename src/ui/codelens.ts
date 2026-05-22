@@ -96,8 +96,9 @@ export function registerCodeLens(
   );
 
   // Subscriber counts may have changed — invalidate so VS Code re-calls
-  // `provideCodeLenses`.
+  // `provideCodeLenses`. Both a full re-index and an incremental save count.
   const storeSub = store.onDidChange(() => provider.fireChange());
+  const fileSub = store.onDidUpdateFile(() => provider.fireChange());
 
   // Setting toggle takes effect without a window reload.
   const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
@@ -106,5 +107,5 @@ export function registerCodeLens(
     }
   });
 
-  return vscode.Disposable.from(registration, storeSub, cfgSub, provider);
+  return vscode.Disposable.from(registration, storeSub, fileSub, cfgSub, provider);
 }

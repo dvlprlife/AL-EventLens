@@ -11,6 +11,7 @@ All notable changes to the AL EventLens extension will be documented in this fil
 ### Changed
 
 - The webview panel's publisher and subscriber lists are now capped at 500 rendered rows (`src/ui/panelHtml.ts`). `renderList` / `renderSubscriberList` rebuilt the entire `<ul>` — one `<li>` per matching row — on every render, so on a large workspace (Microsoft BaseApp in `.alpackages` with trigger-event synthesis on, where the publisher list runs to tens of thousands of rows) the initial unfiltered render froze the panel. Both lists now stop appending past the cap and append a `Showing N of M — refine your search` notice row; the selected/revealed row is always rendered even past the cap so reveal and scroll-into-view still reach it. Searching narrows the list well below the cap.
+- A `.al` file save now updates the webview panel incrementally — only the saved file's publishers and the re-resolved subscriber list are sent — instead of re-posting the entire index (`src/index/store.ts`, `src/ui/panel.ts`, `src/ui/panelHtml.ts`, `src/ui/treeView.ts`, `src/ui/subscriberTreeView.ts`, `src/ui/codelens.ts`). On a large workspace the index is tens of thousands of publishers, so re-cloning it across the webview boundary on every keystroke-save was needless work. The store now distinguishes a full-replace signal (`onDidChange`) from an incremental file-update signal (`onDidUpdateFile`).
 
 ## [0.1.3] - 2026-05-20
 
