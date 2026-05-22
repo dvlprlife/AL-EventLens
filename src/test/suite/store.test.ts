@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { EventKind, ObjectKind, Publisher, Subscriber } from '../../al/types';
 import type { EventIndex } from '../../index/indexer';
-import { EventIndexStore } from '../../index/store';
+import { EventIndexStore, type FileUpdate } from '../../index/store';
 
 // ─── Fixtures ────────────────────────────────────────────────────────────
 
@@ -74,17 +74,53 @@ suite('index/store: EventIndexStore', () => {
     }
   });
 
-  test('updateFile fires onDidChange', () => {
+  test('updateFile fires onDidUpdateFile (not onDidChange), with the file delta', () => {
     const store = new EventIndexStore();
     try {
       const fileUri = vscode.Uri.parse('file:///workspace/A.al');
-      let fireCount = 0;
-      store.onDidChange(() => fireCount++);
+      let changeCount = 0;
+      const updates: FileUpdate[] = [];
+      store.onDidChange(() => changeCount++);
+      store.onDidUpdateFile((u) => updates.push(u));
 
       store.updateFile(fileUri, [makePublisher('codeunit', 'A', 'OnA', { uri: fileUri })], []);
 
-      assert.strictEqual(fireCount, 1);
+      assert.strictEqual(changeCount, 0, 'updateFile must not fire the full-replace onDidChange');
+      assert.strictEqual(updates.length, 1, 'updateFile must fire onDidUpdateFile exactly once');
+      assert.strictEqual(updates[0].uri, fileUri);
+      assert.deepStrictEqual(updates[0].publishers.map((p) => p.eventName), ['OnA'],
+        'payload publishers must be the saved file\'s own publishers');
       assert.strictEqual(store.get().publishers.length, 1);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('onDidUpdateFile payload carries the full, freshly re-resolved subscriber list', () => {
+    const store = new EventIndexStore();
+    try {
+      const subUri = vscode.Uri.parse('file:///workspace/Sub.al');
+      const pubUri = vscode.Uri.parse('file:///workspace/Pub.al');
+      store.set({
+        publishers: [],
+        subscribers: [makeSubscriber('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc', { uri: subUri })],
+        appMeta: new Map()
+      });
+      const updates: FileUpdate[] = [];
+      store.onDidUpdateFile((u) => updates.push(u));
+
+      // Saving Pub.al adds the matching publisher — the Sub.al subscriber (a
+      // different file) must flip to resolved, and the delta payload must
+      // carry the whole re-resolved list so the panel stays correct.
+      store.updateFile(pubUri, [
+        makePublisher('codeunit', 'Sales-Post', 'OnAfterPostSalesDoc', { uri: pubUri })
+      ], []);
+
+      assert.strictEqual(updates.length, 1);
+      assert.strictEqual(updates[0].subscribers.length, 1,
+        'payload carries the full subscriber list, not just the saved file\'s');
+      assert.strictEqual(updates[0].subscribers[0].resolved, true,
+        'a subscriber in another file re-resolves and the payload reflects it');
     } finally {
       store.dispose();
     }
