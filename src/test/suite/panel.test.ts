@@ -282,6 +282,14 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     assert.ok(html.includes('u.path !== m.uriPath'),
       'fileUpdate must replace the saved file publishers, matched by URI path');
   });
+
+  test('renderSubscriberDetail looks the selected subscriber up via an index, not a linear scan', () => {
+    const html = renderPanelHtml('nonce123');
+    assert.ok(html.includes('subscribersBySubKey.set(subKey(s), s)'),
+      'rebuildSubscribersIndex must populate a subKey-keyed index');
+    assert.ok(html.includes('subscribersBySubKey.get(selectedSubKey)'),
+      'renderSubscriberDetail must use the index for an O(1) lookup');
+  });
 });
 
 suite('ui/panel: openPanel singleton + store wiring', () => {
