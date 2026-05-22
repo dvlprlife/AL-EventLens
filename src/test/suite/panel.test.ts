@@ -250,6 +250,16 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     assert.ok(/r\.start \|\| r\._start/.test(html),
       'lineOf must read the cloned _start shape, not only the stripped .start getter');
   });
+
+  test('the search box re-renders through a debounce, not on every raw input event', () => {
+    // Perf: renderList()/renderSubscriberList() rebuild the whole list DOM,
+    // so debouncing keeps a large workspace responsive while typing.
+    const html = renderPanelHtml('nonce123');
+    assert.ok(/function debounce\(/.test(html),
+      'a debounce helper must be defined in the webview script');
+    assert.ok(html.includes("addEventListener('input', debounce(render"),
+      'the search input listener must be wrapped in debounce()');
+  });
 });
 
 suite('ui/panel: openPanel singleton + store wiring', () => {
