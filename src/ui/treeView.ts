@@ -70,11 +70,11 @@ export type TreeNode = AppNode | KindNode | ObjectNode | EventNode | EmptyNode |
 
 // ─── Helpers ────────────────────────────────────────────────────────────
 
-const WORKSPACE_BUCKET = '(workspace)';
+export const WORKSPACE_BUCKET = '(workspace)';
 
 /** Codicon id for a given AL object kind. Drawn from the standard
  *  vscode.ThemeIcon set so it themes automatically — no extra assets. */
-function iconIdForKind(kind: ObjectKind): string {
+export function iconIdForKind(kind: ObjectKind): string {
   switch (kind) {
     case 'codeunit':         return 'symbol-class';
     case 'table':            return 'symbol-struct';

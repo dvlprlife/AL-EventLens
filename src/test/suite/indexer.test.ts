@@ -573,6 +573,9 @@ suite('index/indexer: buildIndex', () => {
     assert.strictEqual(idx.subscribers[0].targetEvent, 'OnAppEvent');
     assert.strictEqual(idx.subscribers[0].resolved, true,
       'subscriber must resolve against the single SymbolReference-derived publisher');
+    assert.strictEqual(idx.subscribers[0].owner.appId, '11111111-1111-1111-1111-111111111111',
+      'a subscriber from .app bundled source must carry the package appId, not undefined — ' +
+      'otherwise the Subscribers tree/panel bucket it under (workspace)');
   });
 
   test('includeTriggerEvents: false skips trigger synthesis entirely', async () => {
