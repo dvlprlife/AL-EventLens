@@ -240,6 +240,16 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     assert.ok(html.includes("setMode('subscribers')"),
       'the revealSubscriber handler must switch the panel to Subscribers mode');
   });
+
+  test('subKey folds in the start line so two subscribers sharing owner/target/event in one file stay distinct', () => {
+    // PR-review finding: keying a subscriber row on path alone collides two
+    // [EventSubscriber] procedures in the same file on the same target event.
+    const html = renderPanelHtml('nonce123');
+    assert.ok(html.includes("pathOf(s.location) || '', lineOf(s.location)"),
+      'subKey must append lineOf(s.location) after the path component');
+    assert.ok(/r\.start \|\| r\._start/.test(html),
+      'lineOf must read the cloned _start shape, not only the stripped .start getter');
+  });
 });
 
 suite('ui/panel: openPanel singleton + store wiring', () => {
