@@ -4,6 +4,19 @@ import type { EventIndex } from './indexer';
 import { resolveSubscribers } from './resolver';
 
 /**
+ * The delta carried by `EventIndexStore.onDidUpdateFile` when a single
+ * `.al` file is re-indexed: the saved file's own publishers, plus the
+ * **full** re-resolved subscriber list — a publisher added or removed in
+ * the saved file can flip `resolved` on subscribers in other files, so
+ * the whole subscriber array is carried, not just the saved file's.
+ */
+export interface FileUpdate {
+  readonly uri: vscode.Uri;
+  readonly publishers: ReadonlyArray<Publisher>;
+  readonly subscribers: ReadonlyArray<Subscriber>;
+}
+
+/**
  * Long-lived, in-memory event index that downstream UI surfaces (panel,
  * tree view, CodeLens, status badges) subscribe to via `onDidChange`. The
  * full-pass indexer (`buildIndex`) seeds the store on activation; the save
@@ -18,9 +31,12 @@ export class EventIndexStore implements vscode.Disposable {
   private current: EventIndex = { publishers: [], subscribers: [], appMeta: new Map() };
   private _isInitialized = false;
   private readonly _onDidChange = new vscode.EventEmitter<EventIndex>();
+  private readonly _onDidUpdateFile = new vscode.EventEmitter<FileUpdate>();
 
-  /** Fires whenever `set` or `updateFile` mutates the index. */
+  /** Fires on a full-index replace — `set()` (initial pass, manual refresh). */
   public readonly onDidChange = this._onDidChange.event;
+  /** Fires on an incremental single-file re-index — `updateFile()`. */
+  public readonly onDidUpdateFile = this._onDidUpdateFile.event;
 
   /** Snapshot accessor — UI surfaces should treat the result as immutable. */
   public get(): EventIndex {
@@ -81,10 +97,14 @@ export class EventIndexStore implements vscode.Disposable {
       appMeta: this.current.appMeta
     };
     this._isInitialized = true;
-    this._onDidChange.fire(this.current);
+    // Incremental signal: the saved file's publishers plus the full
+    // re-resolved subscriber list. `onDidChange` (full replace) is NOT
+    // fired — consumers that need to react to a save subscribe to both.
+    this._onDidUpdateFile.fire({ uri, publishers, subscribers: resolved });
   }
 
   public dispose(): void {
     this._onDidChange.dispose();
+    this._onDidUpdateFile.dispose();
   }
 }

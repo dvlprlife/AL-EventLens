@@ -274,6 +274,14 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     assert.ok(html.includes("'Showing ' + shown + ' of ' + total"),
       'a capped list must append a notice row showing rendered-of-total counts');
   });
+
+  test('the webview handles an incremental fileUpdate message', () => {
+    const html = renderPanelHtml('nonce123');
+    assert.ok(/m\.type === ['"]fileUpdate['"]/.test(html),
+      "the message router must handle the 'fileUpdate' incremental message");
+    assert.ok(html.includes('u.path !== m.uriPath'),
+      'fileUpdate must replace the saved file publishers, matched by URI path');
+  });
 });
 
 suite('ui/panel: openPanel singleton + store wiring', () => {
@@ -578,5 +586,29 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
     // No patchCreate / openPanel — activePanel stays undefined.
     postRevealSubscriberToPanel(makeSubscriber('X', 'Y'));
     assert.ok(true);
+  });
+
+  test('a store file-update posts an incremental fileUpdate message, not the full index', () => {
+    patchCreate();
+    const store = new EventIndexStore();
+    try {
+      openPanel(fakeContext, store);
+      const fake = createCalls[0];
+      const before = fake.posts.length;
+
+      store.updateFile(
+        vscode.Uri.parse('file:///workspace/A.al'),
+        [makePublisher('A', 'OnA')],
+        []
+      );
+
+      const posted = fake.posts.slice(before) as Array<{ type?: string }>;
+      assert.ok(posted.some((m) => m.type === 'fileUpdate'),
+        'a .al save must post a fileUpdate message');
+      assert.ok(!posted.some((m) => m.type === 'index'),
+        'a .al save must not re-post the full index');
+    } finally {
+      store.dispose();
+    }
   });
 });
