@@ -146,7 +146,11 @@ export async function buildIndex(
         // is not JSON-safe.
         for (const src of app.bundledAlSources) {
           const srcUri = vscode.Uri.parse(`al-eventlens-app:/${app.appId}/${src.path}`);
-          const parsed = parseAl(srcUri, src.text);
+          // Stamp the package appId onto the parsed objects so bundled-source
+          // subscribers attribute to their app — without it the Subscribers
+          // tree and panel bucket them under `(workspace)`. The workspace pass
+          // does the equivalent via `attributeToApp`.
+          const parsed = parseAl(srcUri, src.text, app.appId);
           subscribers.push(...parsed.subscribers);
           if (includeTriggerEvents) {
             collectTriggerOwners(src.text, triggerOwners, app.appId);
