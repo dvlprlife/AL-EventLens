@@ -11,6 +11,7 @@ All notable changes to the AL EventLens extension will be documented in this fil
 ### Changed
 
 - The webview panel's publisher and subscriber lists are now capped at 500 rendered rows (`src/ui/panelHtml.ts`). `renderList` / `renderSubscriberList` rebuilt the entire `<ul>` — one `<li>` per matching row — on every render, so on a large workspace (Microsoft BaseApp in `.alpackages` with trigger-event synthesis on, where the publisher list runs to tens of thousands of rows) the initial unfiltered render froze the panel. Both lists now stop appending past the cap and append a `Showing N of M — refine your search` notice row; the selected/revealed row is always rendered even past the cap so reveal and scroll-into-view still reach it. Searching narrows the list well below the cap.
+- `buildIndex` now reads files with bounded concurrency instead of one at a time (`src/index/indexer.ts`, `src/util/concurrency.ts`). Workspace `.al` files, `.app` manifests, and `.app` packages were each read with sequential `await`, so a cold index of a large workspace was serialized I/O. Reads now overlap (up to 16 in flight) via a new `mapLimit` helper; parsing and index merging stay sequential and ordered, so the resulting index is unchanged.
 
 ## [0.1.3] - 2026-05-20
 
