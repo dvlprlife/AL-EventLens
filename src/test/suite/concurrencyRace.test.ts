@@ -391,7 +391,11 @@ suite('index/reindex: generation-guard regression fixes', () => {
   // whole test process, so each test resets it (and the wrapping
   // afterwards is belt-and-suspenders).
   setup(() => { resetAnyGenerationCommittedForTesting(); });
-  teardown(() => { resetAnyGenerationCommittedForTesting(); });
+  teardown(() => {
+    resetAnyGenerationCommittedForTesting();
+    restoreConfig();
+    restoreDiscoverApps();
+  });
 
   test('initial fails with no overlapping refresh: store still initialized via empty fallback', async () => {
     // This is the baseline guard for the activation path's failure
