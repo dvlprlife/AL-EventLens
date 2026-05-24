@@ -185,26 +185,30 @@ function groupByKind(
   return nodes;
 }
 
-/** Group publishers by object name within a single-kind bucket. */
+/** Group publishers by object name within a single-kind bucket. AL
+ *  identifiers are case-insensitive, so the bucket key is lowercased to
+ *  merge variants like `MyCu` and `mycu`; the displayed label keeps the
+ *  first-seen raw casing so the tree mirrors the user's source. */
 function groupByObject(
   publishers: ReadonlyArray<Publisher>,
   countByKey: ReadonlyMap<string, number>
 ): ObjectNode[] {
-  const buckets = new Map<string, Publisher[]>();
+  const buckets = new Map<string, { displayName: string; publishers: Publisher[] }>();
   for (const p of publishers) {
-    let bucket = buckets.get(p.owner.name);
+    const key = p.owner.name.toLowerCase();
+    let bucket = buckets.get(key);
     if (!bucket) {
-      bucket = [];
-      buckets.set(p.owner.name, bucket);
+      bucket = { displayName: p.owner.name, publishers: [] };
+      buckets.set(key, bucket);
     }
-    bucket.push(p);
+    bucket.publishers.push(p);
   }
   const nodes: ObjectNode[] = [];
-  for (const [objectName, bucketPublishers] of buckets) {
+  for (const { displayName, publishers: bucketPublishers } of buckets.values()) {
     nodes.push({
       kind: 'object',
       objectKind: bucketPublishers[0].owner.kind,
-      objectName,
+      objectName: displayName,
       appId: bucketPublishers[0].owner.appId,
       publishers: bucketPublishers,
       subscriberCount: sumSubscribers(bucketPublishers, countByKey)

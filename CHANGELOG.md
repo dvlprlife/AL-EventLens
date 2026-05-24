@@ -19,6 +19,7 @@ All notable changes to the AL EventLens extension will be documented in this fil
 ### Fixed
 
 - Cache cleanup is now version-aware; concurrent writes for different versions of the same appId no longer evict each other, and pre-current-schema orphan files are swept on each successful build (`src/index/cache.ts`, `src/index/indexer.ts`).
+- Publishers and Subscribers trees no longer split a single AL object across casing variants — the `groupByObject` bucket key is lowercased so `codeunit "MyCu"` and `codeunit MyCu` merge into one row (display label keeps the first-seen casing) (`src/ui/treeView.ts`, `src/ui/subscriberTreeView.ts`). The Subscribers tree refresh test now exercises `registerSubscriberTreeView` and asserts on both the `store.onDidChange` (full re-index) and `store.onDidUpdateFile` (incremental `.al` save) wires — a regression that dropped the save wire would previously have gone undetected (`src/test/suite/subscriberTreeView.test.ts`).
 
 ## [0.1.3] - 2026-05-20
 
