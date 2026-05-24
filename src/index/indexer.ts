@@ -30,6 +30,21 @@ export interface EventIndex {
 /** Max file reads in flight at once during `buildIndex` (see `mapLimit`). */
 const READ_CONCURRENCY = 16;
 
+/** One workspace `.al` file's parsed contribution — produced in parallel
+ *  by the Pass-1 worker, merged into the index sequentially afterwards
+ *  in `alUris` order so the resulting index is deterministic. Holding
+ *  the parsed shape (not raw text) caps peak heap at one decoded file
+ *  per in-flight worker rather than every file's text at once. */
+interface AlPassResult {
+  readonly publishers: Publisher[];
+  readonly subscribers: Subscriber[];
+  /** Trigger-owner ObjectRefs collected from this file's Tables and Pages.
+   *  `undefined` when `includeTriggerEvents` is false (the worker skips
+   *  the work entirely); a per-file dedup map is flattened into an array
+   *  for the sequential merge to fold into the global map. */
+  readonly triggerOwnerEntries: ObjectRef[] | undefined;
+}
+
 /** One `.alpackages/*.app`'s parsed contribution — produced in parallel by
  *  the Pass-2 worker, merged into the index sequentially afterwards.
  *  `version` is carried alongside `appId` so the post-merge orphan sweep
@@ -110,19 +125,49 @@ export async function buildIndex(
   // Pass 1: workspace AL source files.
   progress?.report({ message: 'Scanning workspace AL files' });
   const alUris = await vscode.workspace.findFiles('**/*.al', '**/node_modules/**');
-  // Read in parallel (bounded), then parse + merge sequentially below — so
-  // the resulting index is identical regardless of read-completion order.
-  const alFiles = await mapLimit(alUris, READ_CONCURRENCY, async (uri) => ({
-    uri,
-    text: decoder.decode(await vscode.workspace.fs.readFile(uri))
-  }));
-  for (const { uri, text } of alFiles) {
-    const appId = attributeToApp(uri, workspaceApps);
-    const parsed = parseAl(uri, text, appId);
-    publishers.push(...parsed.publishers);
-    subscribers.push(...parsed.subscribers);
-    if (includeTriggerEvents) {
-      collectTriggerOwners(text, triggerOwners, appId);
+  // Read AND parse in parallel (bounded). Each worker returns the parsed
+  // shape — publishers, subscribers, and (when enabled) per-file trigger
+  // owners — so peak heap is one decoded `.al` file's text per in-flight
+  // worker, not every file's text held at once. `parseAl` is pure given
+  // `(uri, text, appId)`, so iterating the results in `alUris` order below
+  // keeps the merged index deterministic regardless of read-completion
+  // order. Per-task `onError: 'skip'` isolates transient read failures
+  // (antivirus lock, sync client, file deleted between `findFiles` and
+  // `readFile`) so a single bad file logs a warn and the rest survive.
+  const alFiles = await mapLimit(
+    alUris,
+    READ_CONCURRENCY,
+    async (uri): Promise<AlPassResult> => {
+      const text = decoder.decode(await vscode.workspace.fs.readFile(uri));
+      const appId = attributeToApp(uri, workspaceApps);
+      const parsed = parseAl(uri, text, appId);
+      let triggerOwnerEntries: ObjectRef[] | undefined;
+      if (includeTriggerEvents) {
+        const ownerMap = new Map<string, ObjectRef>();
+        collectTriggerOwners(text, ownerMap, appId);
+        triggerOwnerEntries = [...ownerMap.values()];
+      }
+      return {
+        publishers: parsed.publishers,
+        subscribers: parsed.subscribers,
+        triggerOwnerEntries
+      };
+    },
+    { onError: 'skip', warnLabel: 'AL EventLens: failed to read .al file' }
+  );
+  for (const result of alFiles) {
+    if (!result) {
+      continue;
+    }
+    publishers.push(...result.publishers);
+    subscribers.push(...result.subscribers);
+    if (result.triggerOwnerEntries) {
+      for (const owner of result.triggerOwnerEntries) {
+        const key = triggerOwnerKey(owner);
+        if (!triggerOwners.has(key)) {
+          triggerOwners.set(key, owner);
+        }
+      }
     }
   }
 
@@ -156,9 +201,13 @@ export async function buildIndex(
     const appResults = await mapLimit(appUris, READ_CONCURRENCY, async (uri): Promise<AppResult | undefined> => {
       try {
         const stat = await vscode.workspace.fs.stat(uri);
-        // Cheap manifest-only read forms the cache key without decompressing
-        // SymbolReference.json or the bundled `src/**`.
-        const meta = await readAppMetadata(uri);
+        // Prefer the manifest metadata already read by `readAppMetadataMap`
+        // above — `readAppMetadata` re-opens the NAVX zip per call, so on
+        // a cold start over many packages reusing the map halves the
+        // per-package work on a cache hit. The fall-through covers the
+        // `!workspaceAppIds.size && includeAllAppVersions` branch where
+        // `metaByUri` is intentionally empty (no map was built at all).
+        const meta = metaByUri.get(uri.toString()) ?? await readAppMetadata(uri);
         const key: CacheKey = { appId: meta.appId, version: meta.version, mtime: stat.mtime };
         const cached = await loadCachedSymbols(context, key);
         if (cached) {
@@ -220,7 +269,21 @@ export async function buildIndex(
         continue;
       }
       if (r.appName !== undefined || r.appPublisher !== undefined) {
-        appMeta.set(r.appId, { appId: r.appId, name: r.appName, appPublisher: r.appPublisher });
+        // Preserve an existing `isWorkspaceApp: true` flag set earlier
+        // for the workspace project that owns this appId. The
+        // `excludeWorkspaceApps` short-circuit keeps a `.app` whose
+        // metadata read transiently failed, so a workspace twin can
+        // slip past exclusion; without this guard the Pass-2 merge
+        // would unconditionally overwrite the entry and strip the
+        // flag, dropping the workspace-first sort and `root-folder`
+        // icon downstream (see treeView.ts / subscriberTreeView.ts).
+        const prev = appMeta.get(r.appId);
+        appMeta.set(r.appId, {
+          appId: r.appId,
+          name: r.appName,
+          appPublisher: r.appPublisher,
+          ...(prev?.isWorkspaceApp ? { isWorkspaceApp: true } : {})
+        });
       }
       publishers.push(...r.appPublishers);
       subscribers.push(...r.subscribers);
