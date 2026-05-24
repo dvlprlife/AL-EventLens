@@ -32,6 +32,17 @@ export function registerSaveWatcher(
 }
 
 /**
+ * Per-URI monotonic generation counter for `handleSave`. Two rapid saves
+ * of the SAME file would otherwise race across the `discoverWorkspaceApps`
+ * await: whichever handler resolves LAST would write its (possibly older)
+ * text into the store. We capture a fresh generation per save and bail
+ * before the `store.updateFile` commit if a newer save for the same URI
+ * has overtaken us. Keyed by `uri.toString()` so saves to DIFFERENT files
+ * race independently — there is no cross-URI coalescing.
+ */
+const latestSaveGeneration = new Map<string, number>();
+
+/**
  * Inner save handler — exported so tests can drive it directly without
  * stubbing `vscode.workspace.onDidSaveTextDocument`. Reads the same two
  * settings as `buildIndex` (`indexOnSave`, `includeTriggerEvents`) and
@@ -48,6 +59,15 @@ export async function handleSave(
   if (cfg.get<boolean>('indexOnSave', true) === false) {
     return;
   }
+
+  // Reserve a fresh per-URI generation BEFORE the synchronous `getText`
+  // so the captured-text-then-await-then-commit window is fully covered:
+  // if a newer save lands while we're awaiting `discoverWorkspaceApps`,
+  // it will bump this counter and our pre-commit check will drop our
+  // commit.
+  const key = document.uri.toString();
+  const myGen = (latestSaveGeneration.get(key) ?? 0) + 1;
+  latestSaveGeneration.set(key, myGen);
 
   const text = document.getText();
   // Attribute the saved file to its workspace AL project so the re-parsed
@@ -76,5 +96,11 @@ export async function handleSave(
     }
   }
 
+  // Generation guard: a newer save for the same URI has overtaken us
+  // while we were awaiting. Drop our (now-stale) commit silently so the
+  // winner's text is what lands in the store.
+  if (latestSaveGeneration.get(key) !== myGen) {
+    return;
+  }
   store.updateFile(document.uri, [...parsed.publishers, ...triggers], parsed.subscribers);
 }

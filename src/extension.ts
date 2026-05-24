@@ -6,7 +6,7 @@ import { registerCodeLens } from './ui/codelens';
 import { runExportMermaid } from './commands/exportMermaid';
 import { registerSaveWatcher } from './index/watcher';
 import { registerWorkspaceFolderReindex } from './index/folderWatcher';
-import { runIndexWithProgress } from './index/reindex';
+import { isLatestGeneration, runIndexAndCommit } from './index/reindex';
 import { EventIndexStore } from './index/store';
 import type { ObjectRef, Publisher, Subscriber } from './al/types';
 import { reviveRange } from './util/reviveLocation';
@@ -21,8 +21,12 @@ export function activate(context: vscode.ExtensionContext): void {
 
   register('alEventLens.openPanel',       () => openPanel(context, store));
   register('alEventLens.refresh',         () => {
-    runIndexWithProgress(context)
-      .then((idx) => store.set(idx))
+    // `runIndexAndCommit` wraps `runIndexWithProgress` with a monotonic
+    // generation guard so an in-flight initial pass cannot overwrite the
+    // store with an older snapshot after a faster Refresh completes — and
+    // vice versa. The last STARTED build wins regardless of resolution
+    // order; we still surface errors via the existing log.
+    runIndexAndCommit(context, store).done
       .catch((err) => console.error('AL EventLens: refresh failed', err));
   });
   register('alEventLens.revealPublisher', (...args) => {
@@ -84,15 +88,20 @@ export function activate(context: vscode.ExtensionContext): void {
   // panel, tree, and CodeLens surfaces can render once it completes.
   // On failure, still mark the store initialized (with an empty index) so
   // the tree's `indexing…` placeholder progresses to the real empty-state
-  // message rather than spinning forever.
-  runIndexWithProgress(context)
+  // message rather than spinning forever — but ONLY if this attempt is
+  // still the latest started generation, so a user-triggered Refresh that
+  // overlapped the initial pass and succeeded is not clobbered by the
+  // initial pass's failure handler.
+  const initial = runIndexAndCommit(context, store);
+  initial.done
     .then((idx) => {
-      store.set(idx);
       console.log(`AL EventLens: indexed ${idx.publishers.length} publishers, ${idx.subscribers.length} subscribers`);
     })
     .catch((err) => {
       console.error('AL EventLens: indexing failed', err);
-      store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+      if (isLatestGeneration(initial.generation)) {
+        store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+      }
     });
 }
 
