@@ -350,6 +350,119 @@ suite('ui/panelHtml: renderPanelHtml', () => {
       "the 'select' handler must call render() BEFORE findLiByKey so a past-cap row is materialized");
   });
 
+  test('relocateSelectedSubKey survives a subscriber whose path contains a literal "|" (issue #117 defect 3)', () => {
+    // Regression: the previous subKey delimiter was '|', so a POSIX path
+    // (or synthetic URI) containing a literal '|' would cause the relocator's
+    // selectedSubKey.split('|') to truncate the path mid-character, leaving
+    // wantIdentity == something that no subIdentityKey could match — the
+    // selection silently cleared instead of being relocated by line-shift.
+    // The fix swaps the delimiter to a C0 control character (U+0001) that
+    // cannot legally appear in any AL identifier or URI representation.
+    // This test exercises the actual webview helpers by extracting them
+    // from the rendered HTML and evaluating them in a controlled scope.
+
+    const html = renderPanelHtml('nonce123');
+    const scriptMatch = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(html);
+    assert.ok(scriptMatch, 'inline <script> must be present in the rendered HTML');
+    const script = scriptMatch![1];
+
+    // Pluck the helper definitions we need. They live as named function
+    // declarations in the inline JS; extract by brace-counting since the
+    // bodies contain nested `{}` (e.g. for-loops inside relocate).
+    function extractFn(name: string): string {
+      const sig = 'function ' + name + '(';
+      const start = script.indexOf(sig);
+      assert.ok(start !== -1, `helper ${name} must be defined in the panel script`);
+      // Walk forward to the opening brace of the function body.
+      let i = script.indexOf('{', start);
+      assert.ok(i !== -1, `helper ${name} must have an opening brace`);
+      let depth = 1;
+      i++;
+      while (i < script.length && depth > 0) {
+        const ch = script[i];
+        if (ch === '{') {
+          depth++;
+        } else if (ch === '}') {
+          depth--;
+        } else if (ch === "'" || ch === '"') {
+          // Skip string literals so a `}` inside a string doesn't unbalance.
+          const quote = ch;
+          i++;
+          while (i < script.length && script[i] !== quote) {
+            if (script[i] === '\\') {
+              i++; // skip escape
+            }
+            i++;
+          }
+        }
+        i++;
+      }
+      assert.ok(depth === 0, `helper ${name} body must be balanced`);
+      return script.slice(start, i);
+    }
+    const fnSubKey = extractFn('subKey');
+    const fnSubIdentityKey = extractFn('subIdentityKey');
+    const fnPathOf = extractFn('pathOf');
+    const fnLineOf = extractFn('lineOf');
+    const fnRelocate = extractFn('relocateSelectedSubKey');
+
+    // Build a controlled scope mirroring the webview's let-bindings. The
+    // Function ctor returns a callable that lets the test drive
+    // relocateSelectedSubKey via shared closure variables.
+    const driver = new Function(
+      'subscribers',
+      'selectedSubKeyIn',
+      `let selectedSubKey = selectedSubKeyIn;
+       let subscribersBySubKey = new Map();
+       ${fnPathOf}
+       ${fnLineOf}
+       ${fnSubKey}
+       ${fnSubIdentityKey}
+       subscribers.forEach(function (s) { subscribersBySubKey.set(subKey(s), s); });
+       ${fnRelocate}
+       relocateSelectedSubKey();
+       return { selectedSubKey: selectedSubKey, subKeyOf: subscribers.length ? subKey(subscribers[0]) : null };`
+    ) as (subs: unknown[], k: string | null) => { selectedSubKey: string | null; subKeyOf: string | null };
+
+    // A subscriber on a path containing '|'. The line shifts from 10 to 20
+    // (simulating an upstream edit that pushed the [EventSubscriber]
+    // attribute down) — its identity (owner, target, event, path) is
+    // unchanged, so the relocator must find it.
+    const pathWithPipe = '/tmp/foo|bar/My Codeunit.al';
+    const baseSub = {
+      owner: { kind: 'codeunit', name: 'My Codeunit' },
+      target: { kind: 'codeunit', name: 'Sales-Post' },
+      targetEvent: 'OnAfterPostSalesDoc',
+      location: {
+        uri: { fsPath: pathWithPipe, path: pathWithPipe },
+        range: { start: { line: 19, character: 0 } } // lineOf returns line+1 = 20
+      }
+    };
+
+    // First compute the OLD subKey (line 10) the panel would have stored
+    // before the save. The driver below builds it from a stale stand-in
+    // subscriber and we feed only that key into relocate.
+    const staleSub = {
+      ...baseSub,
+      location: {
+        uri: { fsPath: pathWithPipe, path: pathWithPipe },
+        range: { start: { line: 9, character: 0 } } // lineOf = 10
+      }
+    };
+    const staleKey = (new Function('s', `${fnPathOf}\n${fnLineOf}\n${fnSubKey}\nreturn subKey(s);`) as (s: unknown) => string)(staleSub);
+
+    // Sanity: the stale key must not match the post-save subKey (different lines).
+    const freshKey = (new Function('s', `${fnPathOf}\n${fnLineOf}\n${fnSubKey}\nreturn subKey(s);`) as (s: unknown) => string)(baseSub);
+    assert.notStrictEqual(staleKey, freshKey,
+      'precondition: a line-shifting save must change the subKey');
+
+    // The fresh subscribers list (post-save) carries baseSub at line 20.
+    // relocateSelectedSubKey must promote selectedSubKey from staleKey to freshKey.
+    const result = driver([baseSub], staleKey);
+    assert.strictEqual(result.selectedSubKey, freshKey,
+      'relocateSelectedSubKey must recover the post-save subKey even when the path contains "|"');
+  });
+
   test('applyToken clears objectIdentity when the app dropdown changes, not just the kind dropdown (defect 4)', () => {
     // The Kind dropdown and the App dropdown both invalidate a prior
     // identity selector — picking a different app makes the tree-revealed
