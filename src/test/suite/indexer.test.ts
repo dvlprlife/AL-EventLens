@@ -1679,8 +1679,19 @@ suite('index/indexer: buildIndex', () => {
       } catch (err) {
         caught = err;
       }
-      assert.strictEqual(caught, SYNTHETIC_PARSER_BUG,
-        'buildIndex must reject with the original parser exception so the extension-level .catch surfaces it');
+      // Post #119: the per-file worker now wraps the original parser
+      // exception in a new Error whose message carries the
+      // `[AL EventLens parser bug]` marker prefix (`extension.ts`
+      // matches on this to surface a `showErrorMessage` toast). The
+      // original exception rides along on `.cause`.
+      assert.ok(caught instanceof Error,
+        'buildIndex must reject with an Error so the extension-level .catch surfaces it');
+      assert.ok((caught as Error).message.startsWith('[AL EventLens parser bug]'),
+        `wrapped error message must start with the marker prefix; got ${(caught as Error).message}`);
+      assert.ok((caught as Error).message.includes('MyCodeunit.al'),
+        `wrapped error message must include the offending file path; got ${(caught as Error).message}`);
+      assert.strictEqual((caught as { cause?: unknown }).cause, SYNTHETIC_PARSER_BUG,
+        'wrapped error must carry the original exception as `.cause` so diagnostics still surface the real stack');
       const bugLog = errorCalls.find((m) =>
         m.includes('AL EventLens parser bug') && m.includes('MyCodeunit.al')
       );

@@ -2,11 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { Publisher, Subscriber } from '../../al/types';
 import type { EventIndex } from '../../index/indexer';
-import {
-  hasAnyGenerationCommitted,
-  resetAnyGenerationCommittedForTesting,
-  runIndexAndCommit
-} from '../../index/reindex';
+import { runIndexAndCommit } from '../../index/reindex';
 import { EventIndexStore } from '../../index/store';
 import { handleSave } from '../../index/watcher';
 import * as appJson from '../../index/appJson';
@@ -387,12 +383,7 @@ suite('index/watcher: handleSave per-URI race coalescing', () => {
 // `done` promise reporting counts for a discarded snapshot.
 
 suite('index/reindex: generation-guard regression fixes', () => {
-  // The module-scoped `anyGenerationCommitted` flag is sticky across the
-  // whole test process, so each test resets it (and the wrapping
-  // afterwards is belt-and-suspenders).
-  setup(() => { resetAnyGenerationCommittedForTesting(); });
   teardown(() => {
-    resetAnyGenerationCommittedForTesting();
     restoreConfig();
     restoreDiscoverApps();
   });
@@ -402,7 +393,7 @@ suite('index/reindex: generation-guard regression fixes', () => {
     // handler — the behavior PR #104 was meant to preserve.
     const store = new EventIndexStore();
     try {
-      assert.strictEqual(hasAnyGenerationCommitted(), false,
+      assert.strictEqual(store.isInitialized, false,
         'precondition: no run has committed yet');
 
       // Simulate the activation path: kick off a failing run.
@@ -413,9 +404,9 @@ suite('index/reindex: generation-guard regression fixes', () => {
       );
 
       // Mirror extension.ts's failure handler: empty-index fallback
-      // gated on `hasAnyGenerationCommitted()`.
+      // gated on `!store.isInitialized` (post #119).
       await initial.done.catch(() => {
-        if (!hasAnyGenerationCommitted()) {
+        if (!store.isInitialized) {
           store.set({ publishers: [], subscribers: [], appMeta: new Map() });
         }
       });
@@ -430,14 +421,14 @@ suite('index/reindex: generation-guard regression fixes', () => {
   });
 
   test('initial fails AFTER an overlapping refresh ALSO fails: store still initialized (defect 1)', async () => {
-    // Defect 1: post-#104, the activation gate used `isLatestGeneration`,
-    // so a refresh that overlapped the initial pass took ownership of
-    // the latest generation — and when the refresh later FAILED (only
-    // logged, no fallback), the initial's failure handler ALSO refused
-    // to install the empty fallback because its generation was no
-    // longer "latest". Result: store never initialized, spinner forever.
-    // The fix gates on `hasAnyGenerationCommitted()` instead, which is
-    // still `false` when both fail.
+    // Defect 1 (issue #113): post-#104, the activation gate used
+    // `isLatestGeneration`, so a refresh that overlapped the initial
+    // pass took ownership of the latest generation — and when the
+    // refresh later FAILED (only logged, no fallback), the initial's
+    // failure handler ALSO refused to install the empty fallback
+    // because its generation was no longer "latest". Result: store
+    // never initialized, spinner forever. Post #119 the gate is
+    // `!store.isInitialized`, which is still `true` when both fail.
     const store = new EventIndexStore();
     try {
       const dInitial = deferred<EventIndex>();
@@ -465,7 +456,7 @@ suite('index/reindex: generation-guard regression fixes', () => {
 
       dInitial.reject(new Error('initial boom'));
       await initial.done.catch(() => {
-        if (!hasAnyGenerationCommitted()) {
+        if (!store.isInitialized) {
           store.set({ publishers: [], subscribers: [], appMeta: new Map() });
         }
       });
@@ -474,6 +465,59 @@ suite('index/reindex: generation-guard regression fixes', () => {
         'when BOTH fail, the fallback must still fire so the spinner clears');
       assert.strictEqual(store.get().publishers.length, 0,
         'fallback installs an empty index');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('initial REJECTS after a save committed during it: save delta survives the empty fallback (issue #119 defect 1)', async () => {
+    // Issue #119 defect 1: the `hasAnyGenerationCommitted` gate was
+    // flipped only by `runIndexAndCommit`, not by `handleSave`. So a
+    // save that landed during a slow initial pass DID commit (setting
+    // `store.isInitialized = true` and seeding real publishers) but
+    // left the flag false — and when the initial pass then rejected,
+    // the empty-index fallback fired and wiped the saved delta.
+    //
+    // The fix gates on `!store.isInitialized` instead, which covers
+    // both commit paths. This test simulates a save committing during
+    // a failing initial pass and asserts the save's publishers survive.
+    patchConfig({});
+    patchDiscoverApps(async () => []);
+    const store = new EventIndexStore();
+    try {
+      const dInitial = deferred<EventIndex>();
+      const initial = runIndexAndCommit(
+        fakeContext(),
+        store,
+        () => dInitial.promise
+      );
+
+      // A save lands while the initial pass is still in flight.
+      const uri = vscode.Uri.parse('file:///workspace/SavedDuringFailingInitial.al');
+      await handleSave(fakeDoc(uri, AL_A), store);
+
+      assert.strictEqual(store.isInitialized, true,
+        'save must initialize the store via `updateFile`');
+      const namesAfterSave = store.get().publishers.map((p) => p.eventName);
+      assert.ok(namesAfterSave.includes('OnEventA'),
+        `save's parse must be in the store; got [${namesAfterSave.join(', ')}]`);
+
+      // Now reject the initial pass. The fallback used to fire because
+      // `hasAnyGenerationCommitted()` was still false; the new gate
+      // `!store.isInitialized` is false, so the fallback is suppressed
+      // and the save's delta survives.
+      dInitial.reject(new Error('initial boom'));
+      await initial.done.catch(() => {
+        if (!store.isInitialized) {
+          store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+        }
+      });
+
+      const finalNames = store.get().publishers.map((p) => p.eventName);
+      assert.ok(finalNames.includes('OnEventA'),
+        `save delta must survive the failing initial; got [${finalNames.join(', ')}]`);
+      assert.ok(finalNames.length > 0,
+        'store must NOT have been wiped to an empty index by the fallback');
     } finally {
       store.dispose();
     }
