@@ -131,23 +131,27 @@ function groupByKind(subscribers: ReadonlyArray<Subscriber>): SubKindNode[] {
   return nodes;
 }
 
-/** Group subscribers by owning object name within a single-kind bucket. */
+/** Group subscribers by owning object name within a single-kind bucket. AL
+ *  identifiers are case-insensitive, so the bucket key is lowercased to
+ *  merge variants like `MyCu` and `mycu`; the displayed label keeps the
+ *  first-seen raw casing so the tree mirrors the user's source. */
 function groupByObject(subscribers: ReadonlyArray<Subscriber>): SubObjectNode[] {
-  const buckets = new Map<string, Subscriber[]>();
+  const buckets = new Map<string, { displayName: string; subscribers: Subscriber[] }>();
   for (const s of subscribers) {
-    let bucket = buckets.get(s.owner.name);
+    const key = s.owner.name.toLowerCase();
+    let bucket = buckets.get(key);
     if (!bucket) {
-      bucket = [];
-      buckets.set(s.owner.name, bucket);
+      bucket = { displayName: s.owner.name, subscribers: [] };
+      buckets.set(key, bucket);
     }
-    bucket.push(s);
+    bucket.subscribers.push(s);
   }
   const nodes: SubObjectNode[] = [];
-  for (const [objectName, bucketSubscribers] of buckets) {
+  for (const { displayName, subscribers: bucketSubscribers } of buckets.values()) {
     nodes.push({
       kind: 'object',
       objectKind: bucketSubscribers[0].owner.kind,
-      objectName,
+      objectName: displayName,
       subscribers: bucketSubscribers
     });
   }

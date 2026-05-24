@@ -2,7 +2,11 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { AppMeta, ObjectKind, Subscriber } from '../../al/types';
 import { EventIndexStore } from '../../index/store';
-import { SubscriberTreeDataProvider, type SubTreeNode } from '../../ui/subscriberTreeView';
+import {
+  SubscriberTreeDataProvider,
+  registerSubscriberTreeView,
+  type SubTreeNode
+} from '../../ui/subscriberTreeView';
 
 // ─── Fixtures ───────────────────────────────────────────────────────────
 
@@ -290,27 +294,58 @@ suite('ui/subscriberTreeView: SubscriberTreeDataProvider', () => {
     }
   });
 
-  test('refresh() fires onDidChangeTreeData (the bridge wired by registerSubscriberTreeView)', () => {
+  test('registerSubscriberTreeView wires both onDidChange (full re-index) and onDidUpdateFile (incremental save)', () => {
     const store = new EventIndexStore();
-    try {
-      const provider = new SubscriberTreeDataProvider(store);
-      let fired = 0;
-      provider.onDidChangeTreeData(() => fired++);
+    // Stub vscode.window.createTreeView so the test can capture the provider
+    // that registerSubscriberTreeView builds internally without exporting it.
+    const originalCreateTreeView = vscode.window.createTreeView;
+    let captured: SubscriberTreeDataProvider | undefined;
+    (vscode.window as { createTreeView: typeof vscode.window.createTreeView }).createTreeView = ((
+      _viewId: string,
+      options: { treeDataProvider: SubscriberTreeDataProvider }
+    ) => {
+      captured = options.treeDataProvider;
+      // Minimal stand-in so the `Disposable.from(view, sub, fileSub)` chain holds.
+      return { dispose: () => {} } as unknown as vscode.TreeView<SubTreeNode>;
+    }) as typeof vscode.window.createTreeView;
 
-      const sub = store.onDidChange(() => provider.refresh());
+    let registration: vscode.Disposable | undefined;
+    try {
+      registration = registerSubscriberTreeView(store);
+      assert.ok(captured, 'registerSubscriberTreeView must hand its provider to createTreeView');
+      const provider = captured!;
+
+      let fired = 0;
+      const evt = provider.onDidChangeTreeData(() => fired++);
       try {
+        // Full re-index path — store.set must drive provider.refresh().
         store.set({
           publishers: [],
           subscribers: [makeSubscriber({ kind: 'codeunit', name: 'S' }, { kind: 'codeunit', name: 'T' }, 'OnX')],
           appMeta: new Map()
         });
-        assert.strictEqual(fired, 1, 'provider must refresh when the store changes');
+        assert.strictEqual(fired, 1, 'store.onDidChange wiring: full re-index must refresh the provider');
+
+        // Incremental save path — store.updateFile must drive provider.refresh() too.
+        // Without the onDidUpdateFile wiring the Subscribers tree would go stale on every .al save.
+        const fileUri = vscode.Uri.parse('file:///incremental.al');
+        store.updateFile(
+          fileUri,
+          [],
+          [makeSubscriber({ kind: 'codeunit', name: 'S2' }, { kind: 'codeunit', name: 'T' }, 'OnY', { uri: fileUri })]
+        );
+        assert.strictEqual(fired, 2, 'store.onDidUpdateFile wiring: incremental save must refresh the provider');
+
+        // Direct refresh() still fires onDidChangeTreeData on the captured provider.
         provider.refresh();
-        assert.strictEqual(fired, 2, 'direct refresh() must also fire onDidChangeTreeData');
+        assert.strictEqual(fired, 3, 'direct refresh() must also fire onDidChangeTreeData');
       } finally {
-        sub.dispose();
+        evt.dispose();
       }
     } finally {
+      registration?.dispose();
+      (vscode.window as { createTreeView: typeof vscode.window.createTreeView }).createTreeView =
+        originalCreateTreeView;
       store.dispose();
     }
   });
