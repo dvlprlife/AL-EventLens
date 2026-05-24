@@ -77,6 +77,15 @@ export async function handleSave(
   // bucket. `store.updateFile` matches surviving records by URI, which is
   // `appId`-independent, so the resolved `appId` simply rides along.
   const workspaceApps = await discoverWorkspaceApps();
+  // Early bail before parseAl: if a newer save has already overtaken us
+  // we'd just throw away the parse result at the pre-commit check below,
+  // and parseAl + collectTriggerOwners can run ~200ms on a large file.
+  // On rapid double-saves this skips that wasted work for every losing
+  // handler. The pre-commit guard further down stays as belt-and-
+  // suspenders for races that resolve between here and the commit.
+  if (latestSaveGeneration.get(key) !== myGen) {
+    return;
+  }
   const appId = attributeToApp(document.uri, workspaceApps);
   const parsed = parseAl(document.uri, text, appId);
 
@@ -85,15 +94,10 @@ export async function handleSave(
     const owners = new Map<string, ObjectRef>();
     collectTriggerOwners(text, owners, appId);
     for (const owner of owners.values()) {
-      // Tag every synthesized trigger publisher with the saved file's URI
-      // so a subsequent save of the same file can replace (not duplicate)
+      // synthesizeTriggerPublishers tags each result with sourceUri so
+      // a subsequent save of the same file can replace (not duplicate)
       // them in the store.
-      triggers.push(
-        ...synthesizeTriggerPublishers(owner).map((p) => ({
-          ...p,
-          sourceUri: document.uri
-        }))
-      );
+      triggers.push(...synthesizeTriggerPublishers(owner, document.uri));
     }
   }
 
@@ -112,4 +116,24 @@ export async function handleSave(
   // generation-gated, so the rebuild's commit isn't blocked by the save
   // alone). The bumped value is discarded; we only want the side effect.
   bumpStartedGeneration();
+  // Bounded-Map cleanup: only delete the generation entry when nothing
+  // newer has reserved a higher gen for this URI. The `=== myGen` check
+  // is what keeps the race protection intact — if a newer save bumped
+  // the gen between our commit and here, we leave its entry in place so
+  // its own commit-time check still sees the right value. Net effect:
+  // the Map only holds in-flight save generations, not historical ones,
+  // so it can't grow unbounded over a long session of saves to many
+  // distinct URIs.
+  if (latestSaveGeneration.get(key) === myGen) {
+    latestSaveGeneration.delete(key);
+  }
+}
+
+/**
+ * Test-only accessor for the per-URI generation Map's current size.
+ * Used by the bounded-Map regression test to assert entries are cleared
+ * after a quiescent save. Not part of the production API surface.
+ */
+export function __getSaveGenerationMapSize(): number {
+  return latestSaveGeneration.size;
 }

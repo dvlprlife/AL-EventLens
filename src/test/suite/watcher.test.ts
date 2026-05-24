@@ -2,8 +2,10 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import { synthesizeTriggerPublishers } from '../../al/triggers';
 import type { ObjectRef, Publisher, Subscriber } from '../../al/types';
+import * as appJson from '../../index/appJson';
+import * as parser from '../../al/parser';
 import { EventIndexStore } from '../../index/store';
-import { handleSave, registerSaveWatcher } from '../../index/watcher';
+import { __getSaveGenerationMapSize, handleSave, registerSaveWatcher } from '../../index/watcher';
 
 // ─── Test harness for monkey-patching getConfiguration ───────────────────
 
@@ -105,6 +107,42 @@ const SAMPLE_TABLE_AL = [
 
 // ─── Tests ──────────────────────────────────────────────────────────────
 
+// ─── discoverWorkspaceApps + parseAl monkey-patch helpers ───────────────
+
+let originalDiscoverWorkspaceApps: typeof appJson.discoverWorkspaceApps;
+function patchDiscoverApps(impl: () => Promise<unknown>): void {
+  originalDiscoverWorkspaceApps = appJson.discoverWorkspaceApps;
+  (appJson as { discoverWorkspaceApps: typeof appJson.discoverWorkspaceApps }).discoverWorkspaceApps =
+    impl as typeof appJson.discoverWorkspaceApps;
+}
+function restoreDiscoverApps(): void {
+  if (originalDiscoverWorkspaceApps) {
+    (appJson as { discoverWorkspaceApps: typeof appJson.discoverWorkspaceApps }).discoverWorkspaceApps =
+      originalDiscoverWorkspaceApps;
+  }
+}
+
+let originalParseAl: typeof parser.parseAl;
+function patchParseAl(impl: typeof parser.parseAl): void {
+  originalParseAl = parser.parseAl;
+  (parser as { parseAl: typeof parser.parseAl }).parseAl = impl;
+}
+function restoreParseAl(): void {
+  if (originalParseAl) {
+    (parser as { parseAl: typeof parser.parseAl }).parseAl = originalParseAl;
+  }
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  resolve(value: T): void;
+}
+function deferred<T>(): Deferred<T> {
+  let resolve!: (v: T) => void;
+  const promise = new Promise<T>((res) => { resolve = res; });
+  return { promise, resolve };
+}
+
 suite('index/watcher: handleSave', () => {
   teardown(() => restoreConfig());
 
@@ -198,6 +236,82 @@ suite('index/watcher: handleSave', () => {
       assert.strictEqual(triggerPubs.length, 10,
         'second save must replace, not append — still exactly 10 trigger publishers');
     } finally {
+      store.dispose();
+    }
+  });
+
+  test('latestSaveGeneration map shrinks back to 0 after a quiescent save commits (defect 1)', async () => {
+    // The Map used to keep one entry per distinct URI ever saved during
+    // the session. A successful commit must drop its own entry (when no
+    // newer save has reserved a higher gen for that URI in the meantime)
+    // so the Map only holds in-flight saves, not historical ones.
+    patchConfig({});
+    const store = new FakeStore();
+    try {
+      const sizeBefore = __getSaveGenerationMapSize();
+      const uri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+      await handleSave(fakeDoc(uri, SAMPLE_CODEUNIT_AL), store);
+      assert.strictEqual(__getSaveGenerationMapSize(), sizeBefore,
+        'a quiescent save must leave the Map at its pre-save size — its own entry must be deleted on successful commit');
+
+      // A second save of a different URI must also clean up after itself.
+      const uri2 = vscode.Uri.parse('file:///workspace/Another.al');
+      await handleSave(fakeDoc(uri2, SAMPLE_CODEUNIT_AL), store);
+      assert.strictEqual(__getSaveGenerationMapSize(), sizeBefore,
+        'a second quiescent save on a different URI must also clean up — Map must not grow with every save');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('handleSave bails between discoverWorkspaceApps and parseAl when its generation is already stale (defect 2)', async () => {
+    // The generation guard used to fire only AFTER parseAl. On rapid
+    // double-saves every losing handler wasted parse work before bailing.
+    // The early-bail check is now placed immediately after the
+    // discoverWorkspaceApps await, so parseAl runs at most once per
+    // overtaken save.
+    patchConfig({});
+    const uri = vscode.Uri.parse('file:///workspace/Rapid.al');
+
+    let parseCalls = 0;
+    patchParseAl((u, text, appId) => {
+      parseCalls++;
+      return originalParseAl(u, text, appId);
+    });
+
+    // Sequence the two saves' discoverWorkspaceApps awaits with deferreds
+    // so save-A is still suspended when save-B starts (bumping the gen).
+    // save-A then resumes and MUST bail before parseAl.
+    const dA = deferred<unknown[]>();
+    const dB = deferred<unknown[]>();
+    let callIdx = 0;
+    patchDiscoverApps(async () => {
+      const which = callIdx++;
+      return (await (which === 0 ? dA.promise : dB.promise)) as unknown as never;
+    });
+
+    const store = new FakeStore();
+    try {
+      const saveA = handleSave(fakeDoc(uri, SAMPLE_CODEUNIT_AL), store);
+      const saveB = handleSave(fakeDoc(uri, SAMPLE_CODEUNIT_AL), store);
+
+      // Resolve B first — it commits, parseAl runs once.
+      dB.resolve([]);
+      await saveB;
+      assert.strictEqual(parseCalls, 1,
+        'the winning save (B) must have run parseAl exactly once');
+
+      // Now resolve A. Its myGen is now stale; it must bail BEFORE
+      // calling parseAl. parseCalls must therefore stay at 1, not climb to 2.
+      dA.resolve([]);
+      await saveA;
+      assert.strictEqual(parseCalls, 1,
+        'the overtaken save (A) must NOT have called parseAl — the early-bail check skips the wasted work');
+      assert.strictEqual(store.calls.length, 1,
+        'only the winning save (B) must have reached store.updateFile');
+    } finally {
+      restoreDiscoverApps();
+      restoreParseAl();
       store.dispose();
     }
   });
