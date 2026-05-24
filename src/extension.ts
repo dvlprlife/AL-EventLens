@@ -6,7 +6,7 @@ import { registerCodeLens } from './ui/codelens';
 import { runExportMermaid } from './commands/exportMermaid';
 import { registerSaveWatcher } from './index/watcher';
 import { registerWorkspaceFolderReindex } from './index/folderWatcher';
-import { isLatestGeneration, runIndexAndCommit } from './index/reindex';
+import { hasAnyGenerationCommitted, runIndexAndCommit } from './index/reindex';
 import { EventIndexStore } from './index/store';
 import type { ObjectRef, Publisher, Subscriber } from './al/types';
 import { reviveRange } from './util/reviveLocation';
@@ -88,18 +88,24 @@ export function activate(context: vscode.ExtensionContext): void {
   // panel, tree, and CodeLens surfaces can render once it completes.
   // On failure, still mark the store initialized (with an empty index) so
   // the tree's `indexing…` placeholder progresses to the real empty-state
-  // message rather than spinning forever — but ONLY if this attempt is
-  // still the latest started generation, so a user-triggered Refresh that
-  // overlapped the initial pass and succeeded is not clobbered by the
-  // initial pass's failure handler.
+  // message rather than spinning forever — but ONLY if NO build has
+  // committed yet. If a user-triggered Refresh overlapped this initial
+  // pass and successfully committed, `hasAnyGenerationCommitted()` is
+  // already true and the fallback would clobber real data. Conversely,
+  // if BOTH this initial pass AND a refresh fail, the flag stays false
+  // and the fallback still fires so the spinner clears.
   const initial = runIndexAndCommit(context, store);
   initial.done
-    .then((idx) => {
-      console.log(`AL EventLens: indexed ${idx.publishers.length} publishers, ${idx.subscribers.length} subscribers`);
+    .then(({ index, committed }) => {
+      if (committed) {
+        console.log(`AL EventLens: indexed ${index.publishers.length} publishers, ${index.subscribers.length} subscribers`);
+      } else {
+        console.log('AL EventLens: initial build superseded - using newer index');
+      }
     })
     .catch((err) => {
       console.error('AL EventLens: indexing failed', err);
-      if (isLatestGeneration(initial.generation)) {
+      if (!hasAnyGenerationCommitted()) {
         store.set({ publishers: [], subscribers: [], appMeta: new Map() });
       }
     });

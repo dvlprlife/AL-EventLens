@@ -2,7 +2,11 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { Publisher, Subscriber } from '../../al/types';
 import type { EventIndex } from '../../index/indexer';
-import { runIndexAndCommit } from '../../index/reindex';
+import {
+  hasAnyGenerationCommitted,
+  resetAnyGenerationCommittedForTesting,
+  runIndexAndCommit
+} from '../../index/reindex';
 import { EventIndexStore } from '../../index/store';
 import { handleSave } from '../../index/watcher';
 import * as appJson from '../../index/appJson';
@@ -370,6 +374,203 @@ suite('index/watcher: handleSave per-URI race coalescing', () => {
       const eventNames = store.calls[0].publishers.map((p) => p.eventName);
       assert.ok(eventNames.includes('OnEventThird'),
         `committed snapshot must be from s3 (OnEventThird), got [${eventNames.join(', ')}]`);
+    } finally {
+      store.dispose();
+    }
+  });
+});
+
+// ─── Tests: generation-guard regression fixes (issue #113) ──────────────
+//
+// These four tests cover the post-#104 defects: spinner-forever when
+// both initial and refresh fail, save-vs-rebuild overwrite, and the
+// `done` promise reporting counts for a discarded snapshot.
+
+suite('index/reindex: generation-guard regression fixes', () => {
+  // The module-scoped `anyGenerationCommitted` flag is sticky across the
+  // whole test process, so each test resets it (and the wrapping
+  // afterwards is belt-and-suspenders).
+  setup(() => { resetAnyGenerationCommittedForTesting(); });
+  teardown(() => { resetAnyGenerationCommittedForTesting(); });
+
+  test('initial fails with no overlapping refresh: store still initialized via empty fallback', async () => {
+    // This is the baseline guard for the activation path's failure
+    // handler — the behavior PR #104 was meant to preserve.
+    const store = new EventIndexStore();
+    try {
+      assert.strictEqual(hasAnyGenerationCommitted(), false,
+        'precondition: no run has committed yet');
+
+      // Simulate the activation path: kick off a failing run.
+      const initial = runIndexAndCommit(
+        fakeContext(),
+        store,
+        async () => { throw new Error('initial boom'); }
+      );
+
+      // Mirror extension.ts's failure handler: empty-index fallback
+      // gated on `hasAnyGenerationCommitted()`.
+      await initial.done.catch(() => {
+        if (!hasAnyGenerationCommitted()) {
+          store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+        }
+      });
+
+      assert.strictEqual(store.isInitialized, true,
+        'store must be initialized so the tree spinner clears');
+      assert.strictEqual(store.get().publishers.length, 0,
+        'fallback installs an empty index');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('initial fails AFTER an overlapping refresh ALSO fails: store still initialized (defect 1)', async () => {
+    // Defect 1: post-#104, the activation gate used `isLatestGeneration`,
+    // so a refresh that overlapped the initial pass took ownership of
+    // the latest generation — and when the refresh later FAILED (only
+    // logged, no fallback), the initial's failure handler ALSO refused
+    // to install the empty fallback because its generation was no
+    // longer "latest". Result: store never initialized, spinner forever.
+    // The fix gates on `hasAnyGenerationCommitted()` instead, which is
+    // still `false` when both fail.
+    const store = new EventIndexStore();
+    try {
+      const dInitial = deferred<EventIndex>();
+      const dRefresh = deferred<EventIndex>();
+
+      // Kick off the initial pass (gen 1).
+      const initial = runIndexAndCommit(
+        fakeContext(),
+        store,
+        () => dInitial.promise
+      );
+      // Kick off a refresh that overlaps it (gen 2 — takes latest).
+      const refresh = runIndexAndCommit(
+        fakeContext(),
+        store,
+        () => dRefresh.promise
+      );
+
+      // Both fail. The refresh failure (matching extension.ts's refresh
+      // handler) only logs; the initial failure runs the empty-fallback
+      // gate.
+      const refreshCaught = refresh.done.catch(() => undefined);
+      dRefresh.reject(new Error('refresh boom'));
+      await refreshCaught;
+
+      dInitial.reject(new Error('initial boom'));
+      await initial.done.catch(() => {
+        if (!hasAnyGenerationCommitted()) {
+          store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+        }
+      });
+
+      assert.strictEqual(store.isInitialized, true,
+        'when BOTH fail, the fallback must still fire so the spinner clears');
+      assert.strictEqual(store.get().publishers.length, 0,
+        'fallback installs an empty index');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('overlapping refresh succeeds: superseded initial resolves with committed: false (defect 4)', async () => {
+    // Defect 4: when `store.set` is skipped because a newer run won,
+    // `runIndexAndCommit`'s `done` resolved with the (discarded) index,
+    // so `extension.ts`'s log line printed publisher/subscriber counts
+    // for a snapshot that never landed in the store. The new
+    // `{ index, committed }` shape lets callers tell.
+    const store = new EventIndexStore();
+    try {
+      const dInitial = deferred<EventIndex>();
+      const dRefresh = deferred<EventIndex>();
+
+      const initial = runIndexAndCommit(
+        fakeContext(),
+        store,
+        () => dInitial.promise
+      );
+      const refresh = runIndexAndCommit(
+        fakeContext(),
+        store,
+        () => dRefresh.promise
+      );
+
+      // Refresh commits first — it has the newer generation.
+      dRefresh.resolve(makeIndex('refresh'));
+      const refreshResult = await refresh.done;
+      assert.strictEqual(refreshResult.committed, true,
+        'refresh wins its own generation race so it commits');
+
+      // Initial resolves later; its generation token is stale, so its
+      // store.set is suppressed and `committed` reports false.
+      dInitial.resolve(makeIndex('initial'));
+      const initialResult = await initial.done;
+      assert.strictEqual(initialResult.committed, false,
+        'superseded initial must report committed: false so the log line can branch');
+      assert.strictEqual(initialResult.index.publishers[0].owner.name, 'initial',
+        'the index field still carries the built (but discarded) snapshot for diagnostics');
+
+      assert.strictEqual(store.get().publishers[0].owner.name, 'refresh',
+        'the store reflects the refresh, not the superseded initial');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('handleSave during an in-flight buildIndex: save survives, rebuild commit is suppressed (defect 2)', async () => {
+    // Defect 2: `latestSaveGeneration` (per-URI, in watcher.ts) and
+    // `latestStartedGeneration` (module-scoped, in reindex.ts) were
+    // independent counters. A buildIndex started before a save would
+    // resolve after the save, and its `store.set(staleIndex)` would
+    // overwrite the saved-file delta — wiping the entire store back to
+    // a pre-save snapshot.
+    //
+    // The fix: after a successful `store.updateFile` in `handleSave`,
+    // bump the started-generation counter so any in-flight buildIndex's
+    // captured token is now stale and its commit is skipped.
+    patchConfig({});
+    patchDiscoverApps(async () => []);
+
+    const store = new RecordingStore();
+    try {
+      const dRebuild = deferred<EventIndex>();
+      // Kick off a buildIndex that won't resolve until we explicitly
+      // resolve `dRebuild` — simulates a slow full re-index.
+      const rebuild = runIndexAndCommit(
+        fakeContext(),
+        store,
+        () => dRebuild.promise
+      );
+
+      // A save lands during the rebuild and commits its delta.
+      const uri = vscode.Uri.parse('file:///workspace/SavedDuringRebuild.al');
+      await handleSave(fakeDoc(uri, AL_A), store);
+
+      assert.strictEqual(store.calls.length, 1,
+        'the save must have committed its delta via updateFile');
+      const afterSavePublishers = store.calls[0].publishers.map((p) => p.eventName);
+      assert.ok(afterSavePublishers.includes('OnEventA'),
+        `save's parsed publishers must be in the store; got [${afterSavePublishers.join(', ')}]`);
+
+      // Now resolve the rebuild. Its `store.set` MUST be suppressed
+      // because the save's `bumpStartedGeneration` invalidated its
+      // captured token.
+      const rebuildIndex = makeIndex('stale-rebuild');
+      dRebuild.resolve(rebuildIndex);
+      const rebuildResult = await rebuild.done;
+
+      assert.strictEqual(rebuildResult.committed, false,
+        'rebuild that started before the save must report committed: false after the bump');
+
+      // The store must still reflect the save's delta — not the stale
+      // rebuild's snapshot.
+      const finalEventNames = store.get().publishers.map((p) => p.eventName);
+      assert.ok(finalEventNames.includes('OnEventA'),
+        `store must retain the save's OnEventA delta; got [${finalEventNames.join(', ')}]`);
+      assert.ok(!finalEventNames.some((n) => n === 'OnAfterFoo'),
+        `stale rebuild's OnAfterFoo must NOT have landed; got [${finalEventNames.join(', ')}]`);
     } finally {
       store.dispose();
     }
