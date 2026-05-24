@@ -44,6 +44,67 @@ export function isLatestGeneration(generation: number): boolean {
 }
 
 /**
+ * Bump the started-generation counter and return the new value. The
+ * return value is informational; the side effect — invalidating any
+ * in-flight `runIndexAndCommit`'s pending `store.set` whose captured
+ * token is now stale — is the point. Called by the save watcher after
+ * a successful `store.updateFile` so a buildIndex started before the
+ * save cannot overwrite the saved-file delta when it finally resolves.
+ */
+export function bumpStartedGeneration(): number {
+  return ++latestStartedGeneration;
+}
+
+/**
+ * Module-scoped flag: has ANY `runIndexAndCommit` call successfully
+ * committed to the store at least once? Used by the activation path's
+ * empty-index fallback so the fallback fires when no build has landed
+ * — even if a newer build is currently in flight and its predecessor
+ * (this caller) lost the generation race AND threw.
+ *
+ * Flips to `true` the first time `store.set(index)` actually runs
+ * inside `runIndexAndCommit`; never flips back. Stays `false` if every
+ * attempt either threw or was superseded.
+ */
+let anyGenerationCommitted = false;
+
+/**
+ * Whether any `runIndexAndCommit` call has committed a built index to
+ * the store. The activation path's failure handler uses this — instead
+ * of `isLatestGeneration` — to decide whether to install the empty
+ * fallback: if no build has committed, the spinner needs to clear; if
+ * any build (even one whose generation token was later superseded) has
+ * committed, the store already has real data and the fallback would
+ * clobber it.
+ */
+export function hasAnyGenerationCommitted(): boolean {
+  return anyGenerationCommitted;
+}
+
+/**
+ * Test-only: reset the module-scoped `anyGenerationCommitted` flag so
+ * tests that exercise the activation-failure path can do so in
+ * isolation. Production code MUST NOT call this.
+ */
+export function resetAnyGenerationCommittedForTesting(): void {
+  anyGenerationCommitted = false;
+}
+
+/**
+ * The shape `runIndexAndCommit`'s `done` promise resolves to: the
+ * built index, plus a flag indicating whether THIS run's
+ * `store.set(index)` actually ran. `committed: false` means a newer
+ * `runIndexAndCommit` (or a save's `bumpStartedGeneration`) bumped the
+ * counter past this run's reserved token before it could commit, so
+ * the snapshot in `index` was discarded — callers logging or counting
+ * on the result should branch on `committed`.
+ */
+export interface RunIndexResult {
+  readonly index: EventIndex;
+  readonly committed: boolean;
+}
+
+/**
  * Build the index and commit the result to the store under
  * last-started-wins ordering. Wraps `runIndexWithProgress` (overridable
  * via `indexFn` for tests).
@@ -51,9 +112,10 @@ export function isLatestGeneration(generation: number): boolean {
  * Returns the generation token reserved by this call so a caller can
  * gate its own failure-fallback `store.set` by the same counter via
  * `isLatestGeneration(token)` — see the activation path in
- * `extension.ts`. If another caller increments the counter while this
- * run is in flight, the late result is dropped silently — `store.set`
- * is NOT called on the success path.
+ * `extension.ts`. If another caller (or `bumpStartedGeneration`)
+ * increments the counter while this run is in flight, the late result
+ * is dropped silently — `store.set` is NOT called on the success path
+ * and `done` resolves with `committed: false`.
  *
  * Errors from `indexFn` propagate to the caller so the existing
  * activation / refresh / folder-change `.catch` paths still log; the
@@ -65,13 +127,15 @@ export function runIndexAndCommit(
   context: vscode.ExtensionContext,
   store: EventIndexStore,
   indexFn: (ctx: vscode.ExtensionContext) => Promise<EventIndex> = runIndexWithProgress
-): { generation: number; done: Promise<EventIndex> } {
+): { generation: number; done: Promise<RunIndexResult> } {
   const generation = ++latestStartedGeneration;
-  const done = indexFn(context).then((index) => {
+  const done = indexFn(context).then((index): RunIndexResult => {
     if (generation === latestStartedGeneration) {
       store.set(index);
+      anyGenerationCommitted = true;
+      return { index, committed: true };
     }
-    return index;
+    return { index, committed: false };
   });
   return { generation, done };
 }

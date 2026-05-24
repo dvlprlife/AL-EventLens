@@ -3,6 +3,7 @@ import { parseAl } from '../al/parser';
 import { collectTriggerOwners, synthesizeTriggerPublishers } from '../al/triggers';
 import type { ObjectRef, Publisher } from '../al/types';
 import { attributeToApp, discoverWorkspaceApps } from './appJson';
+import { bumpStartedGeneration } from './reindex';
 import type { EventIndexStore } from './store';
 
 /**
@@ -103,4 +104,12 @@ export async function handleSave(
     return;
   }
   store.updateFile(document.uri, [...parsed.publishers, ...triggers], parsed.subscribers);
+  // Invalidate any in-flight `runIndexAndCommit` whose captured generation
+  // token is older than the bumped counter. Without this, a buildIndex
+  // started BEFORE the save can resolve AFTER and overwrite the saved-
+  // file delta with its pre-save snapshot (the save's incremental update
+  // and the buildIndex's full-replace `store.set` are independently
+  // generation-gated, so the rebuild's commit isn't blocked by the save
+  // alone). The bumped value is discarded; we only want the side effect.
+  bumpStartedGeneration();
 }
