@@ -1,3 +1,4 @@
+import type * as vscode from 'vscode';
 import { stripComments } from './parser';
 import type { ObjectRef, Publisher } from './types';
 
@@ -34,14 +35,26 @@ const PAGE_TRIGGER_EVENTS: ReadonlyArray<string> = [
  * Returns `[]` for any other object kind, including `tableextension` and
  * `pageextension` — extensions don't define their own trigger events;
  * subscribers target the underlying table or page.
+ *
+ * Pass `sourceUri` (the URI of the workspace `.al` file declaring the
+ * Table/Page) so the `EventIndexStore`'s save-survival filter can evict
+ * these synthesized publishers when the same file is re-saved. `.app`-
+ * bundled trigger owners have no workspace source file — call without
+ * `sourceUri` for those; the resulting `undefined` survives every
+ * workspace-save eviction (correct behavior — bundled triggers must not
+ * be replaced by a workspace save event).
  */
-export function synthesizeTriggerPublishers(owner: ObjectRef): Publisher[] {
+export function synthesizeTriggerPublishers(
+  owner: ObjectRef,
+  sourceUri?: vscode.Uri
+): Publisher[] {
   const events = triggerEventsFor(owner.kind);
   return events.map((eventName) => ({
     owner,
     eventName,
     kind: 'trigger' as const,
-    location: undefined
+    location: undefined,
+    sourceUri
   }));
 }
 

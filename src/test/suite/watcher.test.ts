@@ -1,6 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import type { Publisher, Subscriber } from '../../al/types';
+import { synthesizeTriggerPublishers } from '../../al/triggers';
+import type { ObjectRef, Publisher, Subscriber } from '../../al/types';
 import { EventIndexStore } from '../../index/store';
 import { handleSave, registerSaveWatcher } from '../../index/watcher';
 
@@ -196,6 +197,43 @@ suite('index/watcher: handleSave', () => {
       const triggerPubs = store.get().publishers.filter((p) => p.kind === 'trigger');
       assert.strictEqual(triggerPubs.length, 10,
         'second save must replace, not append — still exactly 10 trigger publishers');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('buildIndex-synthesized workspace triggers do not duplicate on save (issue #107)', async () => {
+    // The regression: buildIndex emitted workspace trigger publishers with
+    // sourceUri: undefined, so the store's survival filter (location.uri ??
+    // sourceUri) never matched them and every save appended a fresh set.
+    // The fix tags workspace-pass triggers with the declaring .al URI.
+    // This test seeds the store with what a fixed buildIndex now produces —
+    // 10 trigger publishers tagged sourceUri = MyTable.al — then drives one
+    // handleSave through the watcher and asserts the post-save count is
+    // still exactly 10 (not 20), with each eventName appearing once.
+    patchConfig({});
+    const store = new FakeStore();
+    try {
+      const uri = vscode.Uri.parse('file:///workspace/MyTable.al');
+      const owner: ObjectRef = { kind: 'table', id: 50200, name: 'My Table' };
+      // Mimic buildIndex's tagged output (the contract under test).
+      const seeded = synthesizeTriggerPublishers(owner, uri);
+      assert.strictEqual(seeded.length, 10);
+      assert.ok(seeded.every((p) => p.sourceUri?.toString() === uri.toString()),
+        'precondition: seeded publishers must carry sourceUri matching the table file');
+
+      store.set({ publishers: seeded, subscribers: [], appMeta: new Map() });
+
+      await handleSave(fakeDoc(uri, SAMPLE_TABLE_AL), store);
+
+      const triggerPubs = store.get().publishers.filter(
+        (p: Publisher) => p.kind === 'trigger' && p.owner.name === 'My Table'
+      );
+      assert.strictEqual(triggerPubs.length, 10,
+        'save must REPLACE the buildIndex-synthesized triggers, not append a duplicate set');
+      const eventNames = triggerPubs.map((p: Publisher) => p.eventName).sort();
+      assert.strictEqual(new Set(eventNames).size, eventNames.length,
+        'every trigger eventName must appear exactly once after the save');
     } finally {
       store.dispose();
     }

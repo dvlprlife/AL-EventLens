@@ -369,6 +369,68 @@ suite('index/indexer: buildIndex', () => {
       'every synthesized trigger from a workspace Table must have appId: undefined');
   });
 
+  test('synthesized workspace trigger publishers carry sourceUri = declaring .al file URI (issue #107)', async () => {
+    // Pre-fix, buildIndex emitted workspace trigger publishers with
+    // sourceUri: undefined, so the EventIndexStore's save-survival filter
+    // (location.uri ?? sourceUri) never matched them and every save
+    // appended a duplicate set. The synthesized publishers must now carry
+    // the URI of the .al file that declared the Table/Page so a
+    // subsequent handleSave() can evict the previous set cleanly.
+    const tableUri = vscode.Uri.parse('file:///workspace/MyTable.al');
+    const fs: FakeFs = {
+      bytes: new Map([[tableUri.toString(), encode(SAMPLE_TABLE_AL)]])
+    };
+    applyPatches({
+      alFiles: [tableUri],
+      appFiles: [],
+      fs
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const triggerPubs = idx.publishers.filter((p) => p.kind === 'trigger');
+    assert.strictEqual(triggerPubs.length, 10);
+    assert.ok(triggerPubs.every((p) => p.sourceUri?.toString() === tableUri.toString()),
+      'every workspace-pass trigger must carry sourceUri pointing at its declaring .al file');
+    assert.ok(triggerPubs.every((p) => p.location === undefined),
+      'synthesized triggers still have no location (only sourceUri)');
+  });
+
+  test('.app-bundled trigger publishers keep sourceUri === undefined (issue #107)', async () => {
+    // The flip side: a Table that lives in bundled .app source (not in the
+    // workspace) MUST NOT be tagged with a sourceUri, otherwise a workspace
+    // save of any URI sharing that string could evict it. Bundled triggers
+    // are correctly anchored only by their (appId, kind, name) and the
+    // absence of a sourceUri means the survival filter's
+    // `undefined !== uriKey` keeps them across every workspace save.
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const bundledTableAl = [
+      'table 50300 "App Table"',
+      '{',
+      '    fields { field(1; "No."; Code[20]) { } }',
+      '}'
+    ].join('\n');
+    const appBytes = await buildAppBytes({
+      bundledFiles: { 'src/AppTable.al': bundledTableAl }
+    });
+    const fs: FakeFs = {
+      bytes: new Map([[appUri.toString(), appBytes]])
+    };
+    applyPatches({
+      alFiles: [],
+      appFiles: [appUri],
+      fs
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const triggerPubs = idx.publishers.filter((p) => p.kind === 'trigger');
+    assert.strictEqual(triggerPubs.length, 10,
+      '.app-bundled Table must still synthesize its 10 trigger publishers');
+    assert.ok(triggerPubs.every((p) => p.sourceUri === undefined),
+      '.app-bundled triggers must keep sourceUri: undefined so a workspace save cannot evict them');
+  });
+
   test('tolerates a corrupted .app: warns and continues with the remaining packages', async () => {
     const badUri = vscode.Uri.parse('file:///workspace/.alpackages/Bad.app');
     const goodUri = vscode.Uri.parse('file:///workspace/.alpackages/Good.app');
