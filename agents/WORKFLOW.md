@@ -2,6 +2,8 @@
 
 This document describes the full lifecycle of an issue through the agent system for the `dvlprlife/AL-EventLens` repository.
 
+> **Cutting a release?** See [`RELEASE.md`](RELEASE.md) — the release process is mechanical and doesn't go through the planner/worker pipeline.
+
 ## Agents
 
 | Agent | File | Purpose |
