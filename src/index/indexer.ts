@@ -4,7 +4,13 @@ import { collectTriggerOwners, synthesizeTriggerPublishers } from '../al/trigger
 import { readApp, readAppMetadata } from '../symbols/appReader';
 import { parseSymbolReference } from '../symbols/detect';
 import { attributeToApp, discoverWorkspaceApps } from './appJson';
-import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from './cache';
+import {
+  loadCachedSymbols,
+  orphanCacheKey,
+  pruneOrphanCacheEntries,
+  storeCachedSymbols,
+  type CacheKey
+} from './cache';
 import { resolveSubscribers } from './resolver';
 import type { AppMeta, ObjectRef, Publisher, Subscriber } from '../al/types';
 import { compareVersions } from '../util/versions';
@@ -25,9 +31,13 @@ export interface EventIndex {
 const READ_CONCURRENCY = 16;
 
 /** One `.alpackages/*.app`'s parsed contribution — produced in parallel by
- *  the Pass-2 worker, merged into the index sequentially afterwards. */
+ *  the Pass-2 worker, merged into the index sequentially afterwards.
+ *  `version` is carried alongside `appId` so the post-merge orphan sweep
+ *  can form `(appId, version)` keys for every package visited (cache hit
+ *  OR cache write) this session. */
 interface AppResult {
   readonly appId: string;
+  readonly appVersion: string;
   readonly appName: string | undefined;
   readonly appPublisher: string | undefined;
   readonly appPublishers: Publisher[];
@@ -156,6 +166,7 @@ export async function buildIndex(
           // skip the full `readApp` NAVX + PKZIP decompression entirely.
           return {
             appId: meta.appId,
+            appVersion: meta.version,
             appName: cached.name,
             appPublisher: cached.appPublisher,
             appPublishers: cached.publishers,
@@ -187,6 +198,7 @@ export async function buildIndex(
         );
         return {
           appId: app.appId,
+          appVersion: meta.version,
           appName: app.name,
           appPublisher: app.appPublisher,
           appPublishers,
@@ -199,6 +211,10 @@ export async function buildIndex(
       }
     });
     // Sequential merge — `appUris` order, so the index is deterministic.
+    // `visitedKeys` collects one `(appId, version)` entry per package that
+    // contributed to the index this session (cache hit OR cache write);
+    // it feeds the orphan sweep below.
+    const visitedKeys = new Set<string>();
     for (const r of appResults) {
       if (!r) {
         continue;
@@ -214,6 +230,17 @@ export async function buildIndex(
       for (const owner of r.triggerOwners) {
         triggerOwners.set(triggerOwnerKey(owner), owner);
       }
+      visitedKeys.add(orphanCacheKey(r.appId, r.appVersion));
+    }
+    // Best-effort one-time orphan sweep — drops cache files for apps no
+    // longer present in `.alpackages` and any pre-current-schema files
+    // left behind by older releases. Runs only after Pass 2 finishes
+    // normally (any earlier throw skips this naturally); failures are
+    // logged but never block the index.
+    try {
+      await pruneOrphanCacheEntries(context, visitedKeys);
+    } catch (err) {
+      console.warn(`AL EventLens: cache orphan sweep failed: ${err}`);
     }
   }
 

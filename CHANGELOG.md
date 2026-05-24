@@ -16,6 +16,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 - A warm symbol cache now skips re-reading a `.app` package entirely (`src/index/cache.ts`, `src/index/indexer.ts`). The cache stored only publishers, so `buildIndex` still fully decompressed every `.alpackages/*.app` on each index — to re-parse its bundled `src/**/*.al` for subscribers — even on a cache hit. The cache (schema v5) now also stores the bundled-source subscribers and trigger owners, so a hit reuses them and skips the `readApp` NAVX + PKZIP decompression. Subscriber resolution is still recomputed globally; pre-v5 cache files are re-parsed once on upgrade.
 - The panel's subscriber detail pane now looks the selected subscriber up through a row-keyed index rather than a linear scan (`src/ui/panelHtml.ts`), so selecting a row stays instant on a workspace with many subscribers.
 
+### Fixed
+
+- Cache cleanup is now version-aware; concurrent writes for different versions of the same appId no longer evict each other, and pre-current-schema orphan files are swept on each successful build (`src/index/cache.ts`, `src/index/indexer.ts`).
+
 ## [0.1.3] - 2026-05-20
 
 ### Fixed

@@ -151,8 +151,11 @@ export async function loadCachedSymbols(
  * Strips `vscode.Location` from publishers before serializing — `.app`
  * publishers never carry one and the type isn't JSON-safe; subscribers
  * keep their location, flattened to a JSON-safe `loc`. Also cleans up any
- * older cache entries for the same `appId` so a version bump doesn't leave
- * stale files behind.
+ * older entries for the same `(appId, version)` pair (different mtime) so
+ * a re-build with a newer `.app` mtime doesn't leave stale files behind.
+ * Cleanup is intentionally keyed on `(appId, version)`, not appId alone,
+ * so concurrent writes for different versions of the same app (the
+ * `includeAllAppVersions=true` case) don't evict each other's entries.
  */
 export async function storeCachedSymbols(
   context: vscode.ExtensionContext,
@@ -172,10 +175,14 @@ export async function storeCachedSymbols(
 
   const target = cacheFileUri(context, key);
   const targetName = target.path.slice(target.path.lastIndexOf('/') + 1);
-  const appPrefix = `${safe(key.appId)}__`;
+  // Version-aware prefix: only stale-mtime entries for the SAME
+  // (appId, version) pair are cleaned up. Other versions of the same
+  // appId are preserved, so concurrent writes under
+  // `includeAllAppVersions=true` do not evict each other.
+  const versionPrefix = `${safe(key.appId)}__${safe(key.version)}__`;
 
-  // Best-effort cleanup of older entries for the same appId. The
-  // directory was just created above; any failure here is purely
+  // Best-effort cleanup of older entries for the same (appId, version).
+  // The directory was just created above; any failure here is purely
   // defensive and must not block the write.
   try {
     const entries = await vscode.workspace.fs.readDirectory(dir);
@@ -183,7 +190,7 @@ export async function storeCachedSymbols(
       if (fileType !== vscode.FileType.File) {
         continue;
       }
-      if (!name.startsWith(appPrefix) || !name.endsWith('.json')) {
+      if (!name.startsWith(versionPrefix) || !name.endsWith('.json')) {
         continue;
       }
       if (name === targetName) {
@@ -227,4 +234,95 @@ export async function storeCachedSymbols(
     target,
     new TextEncoder().encode(JSON.stringify(payload))
   );
+}
+
+/**
+ * Form the canonical `(appId, version)` key used by
+ * `pruneOrphanCacheEntries` to decide which cache files to keep. Uses
+ * the same `safe()` sanitizer as `cacheFileUri` so on-disk filenames and
+ * `knownKeys` entries collate identically.
+ */
+export function orphanCacheKey(appId: string, version: string): string {
+  return `${safe(appId)}__${safe(version)}`;
+}
+
+/**
+ * One-time orphan sweep over the `symbols/` cache directory. Removes any
+ * cache file whose `(appId, version)` pair is not in `knownKeys` OR
+ * whose payload's `schemaVersion` is not the current `SCHEMA_VERSION`.
+ * Best-effort — individual delete failures and the readDirectory failure
+ * are swallowed, never thrown.
+ *
+ * Intended call site: tail of a successful `buildIndex` pass over
+ * `.alpackages`, with `knownKeys` populated from every `(appId, version)`
+ * pair visited that session (cache hit OR cache write). MUST NOT be
+ * called on a partial / aborted build, since that would erase entries
+ * for apps merely not visited yet.
+ *
+ * `knownKeys` strings are the result of `orphanCacheKey(appId, version)`
+ * — one entry per `(appId, version)` pair. A filename's key is derived
+ * by stripping the trailing `__<mtime>.json`.
+ *
+ * No-op when caching is disabled, mirroring `loadCachedSymbols` /
+ * `storeCachedSymbols`.
+ */
+export async function pruneOrphanCacheEntries(
+  context: vscode.ExtensionContext,
+  knownKeys: ReadonlySet<string>
+): Promise<void> {
+  if (!isCacheEnabled()) {
+    return;
+  }
+  const dir = symbolsDirUri(context);
+  let entries: [string, vscode.FileType][];
+  try {
+    entries = await vscode.workspace.fs.readDirectory(dir);
+  } catch {
+    // Cache dir doesn't exist (or is unreadable) — nothing to prune.
+    return;
+  }
+  for (const [name, fileType] of entries) {
+    if (fileType !== vscode.FileType.File || !name.endsWith('.json')) {
+      continue;
+    }
+    // Derive the `(appId, version)` key by stripping the trailing
+    // `__<mtime>.json` segment. A filename without the expected
+    // double-underscore + numeric mtime suffix is treated as an orphan
+    // — it cannot have been produced by the current `cacheFileUri`.
+    const baseName = name.slice(0, -'.json'.length);
+    const lastSep = baseName.lastIndexOf('__');
+    let key: string | undefined;
+    if (lastSep > 0) {
+      key = baseName.slice(0, lastSep);
+    }
+
+    let shouldDelete = false;
+    if (key === undefined || !knownKeys.has(key)) {
+      shouldDelete = true;
+    } else {
+      // Key matches a visited app — keep only if the payload is current
+      // schema. A malformed / unreadable file at a known key is also an
+      // orphan (it can't be loaded), so delete it too.
+      try {
+        const bytes = await vscode.workspace.fs.readFile(
+          vscode.Uri.joinPath(dir, name)
+        );
+        const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
+        const sv = (parsed as { schemaVersion?: unknown } | null)?.schemaVersion;
+        if (sv !== SCHEMA_VERSION) {
+          shouldDelete = true;
+        }
+      } catch {
+        shouldDelete = true;
+      }
+    }
+    if (!shouldDelete) {
+      continue;
+    }
+    try {
+      await vscode.workspace.fs.delete(vscode.Uri.joinPath(dir, name));
+    } catch {
+      // Skip any single file we can't delete; sweep is best-effort.
+    }
+  }
 }

@@ -3,7 +3,12 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import type { ObjectRef, Publisher, Subscriber } from '../../al/types';
-import { loadCachedSymbols, storeCachedSymbols, type CacheKey } from '../../index/cache';
+import {
+  loadCachedSymbols,
+  pruneOrphanCacheEntries,
+  storeCachedSymbols,
+  type CacheKey
+} from '../../index/cache';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -261,28 +266,109 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
     assert.strictEqual(matching.length, 0, `expected no X__*.json files, got: ${JSON.stringify(entries)}`);
   });
 
-  test('store cleans up older versions for the same appId but spares other appIds', async () => {
-    // Populate two versions for appId X plus an unrelated appId Y.
+  test('store cleans up stale-mtime entries for the same (appId, version) but spares other versions and other appIds', async () => {
+    // Populate an older-mtime entry for (X, 1.0), an entry for a
+    // different version (X, 2.0), and an unrelated appId Y.
     await store(ctx, { appId: 'X', version: '1.0', mtime: 100 }, [
-      makePublisher('A', 'OnV1')
+      makePublisher('A', 'OnV1Old')
+    ]);
+    await store(ctx, { appId: 'X', version: '2.0', mtime: 200 }, [
+      makePublisher('A', 'OnV2')
     ]);
     await store(ctx, { appId: 'Y', version: '1.0', mtime: 100 }, [
       makePublisher('B', 'OnY')
     ]);
-    // Now bump X to 2.0 — should leave exactly one X__*.json (the 2.0
-    // one) and leave Y alone.
-    await store(ctx, { appId: 'X', version: '2.0', mtime: 200 }, [
-      makePublisher('A', 'OnV2')
+    // Now re-write (X, 1.0) with a newer mtime — should evict ONLY the
+    // older-mtime (X, 1.0) entry. (X, 2.0) must survive (different
+    // version), and Y must survive (different appId).
+    await store(ctx, { appId: 'X', version: '1.0', mtime: 999 }, [
+      makePublisher('A', 'OnV1New')
     ]);
 
     const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
     const entries = await vscode.workspace.fs.readDirectory(symbolsDir);
-    const xFiles = entries.filter(([name]) => name.startsWith('X__'));
+    const xV1Files = entries.filter(([name]) => name.startsWith('X__1.0__'));
+    const xV2Files = entries.filter(([name]) => name.startsWith('X__2.0__'));
     const yFiles = entries.filter(([name]) => name.startsWith('Y__'));
 
-    assert.strictEqual(xFiles.length, 1, `expected one X__*.json, got: ${JSON.stringify(xFiles)}`);
-    assert.ok(xFiles[0][0].includes('2.0'), `surviving X file must be 2.0, got: ${xFiles[0][0]}`);
+    assert.strictEqual(xV1Files.length, 1,
+      `expected one X__1.0__*.json (the newer mtime), got: ${JSON.stringify(xV1Files)}`);
+    assert.ok(xV1Files[0][0].includes('__999.'),
+      `surviving X 1.0 file must be the newer mtime, got: ${xV1Files[0][0]}`);
+    assert.strictEqual(xV2Files.length, 1,
+      `X__2.0__*.json must survive — cleanup is version-aware: ${JSON.stringify(xV2Files)}`);
     assert.strictEqual(yFiles.length, 1, `Y__*.json must survive, got: ${JSON.stringify(yFiles)}`);
+  });
+
+  test('concurrent stores for different versions of the same appId both persist (PR #92 race)', async () => {
+    // Reproduces the `includeAllAppVersions=true` race: with PR #92's
+    // parallel Pass-2 worker, two different-version writes for the same
+    // appId race their cleanup sweeps and previously evicted each other.
+    // Version-aware cleanup must let both persist.
+    const key1: CacheKey = { appId: 'X', version: '1.0.0.0', mtime: 100 };
+    const key2: CacheKey = { appId: 'X', version: '2.0.0.0', mtime: 200 };
+    const pubA = makePublisher('A', 'OnV1');
+    const pubB = makePublisher('B', 'OnV2');
+
+    // Repeat to widen the race window — single-shot would still pass on a
+    // serialized scheduler.
+    for (let i = 0; i < 5; i++) {
+      // Clean slate per iteration.
+      await rmrf(vscode.Uri.joinPath(tmpRoot, 'symbols'));
+      await Promise.all([
+        store(ctx, key1, [pubA]),
+        store(ctx, key2, [pubB])
+      ]);
+
+      const loaded1 = await loadCachedSymbols(ctx, key1);
+      const loaded2 = await loadCachedSymbols(ctx, key2);
+      assert.ok(loaded1, `iteration ${i}: (X, 1.0.0.0) must persist alongside (X, 2.0.0.0)`);
+      assert.ok(loaded2, `iteration ${i}: (X, 2.0.0.0) must persist alongside (X, 1.0.0.0)`);
+      assert.strictEqual(loaded1!.publishers[0].eventName, 'OnV1');
+      assert.strictEqual(loaded2!.publishers[0].eventName, 'OnV2');
+    }
+  });
+
+  test('pruneOrphanCacheEntries removes entries for unvisited apps and pre-current-schema files', async () => {
+    // Visited app A — current schema, must survive.
+    await store(ctx, { appId: 'A', version: '1.0', mtime: 100 }, [
+      makePublisher('A1', 'OnA')
+    ]);
+    // Unvisited app B — current schema, must be deleted.
+    await store(ctx, { appId: 'B', version: '1.0', mtime: 100 }, [
+      makePublisher('B1', 'OnB')
+    ]);
+    // Pre-current-schema (v4) file for app C — must be deleted even if
+    // we pretend C was visited, since the payload can't be loaded by
+    // the current code.
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    const cFile = vscode.Uri.joinPath(symbolsDir, 'C__1.0__100.json');
+    await vscode.workspace.fs.writeFile(
+      cFile,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 4,
+        publishers: [
+          { owner: { kind: 'codeunit', name: 'Old', appId: 'C' }, eventName: 'OnOld', kind: 'integration' }
+        ],
+        name: 'Sample',
+        appPublisher: 'Acme'
+      }))
+    );
+
+    // Only A is "visited" — B is an orphan, C is pre-current-schema.
+    await pruneOrphanCacheEntries(ctx, new Set(['A__1.0']));
+
+    const entries = await vscode.workspace.fs.readDirectory(symbolsDir);
+    const aFiles = entries.filter(([name]) => name.startsWith('A__'));
+    const bFiles = entries.filter(([name]) => name.startsWith('B__'));
+    const cFiles = entries.filter(([name]) => name.startsWith('C__'));
+
+    assert.strictEqual(aFiles.length, 1,
+      `A__*.json (visited, current schema) must survive: ${JSON.stringify(aFiles)}`);
+    assert.strictEqual(bFiles.length, 0,
+      `B__*.json (unvisited) must be swept: ${JSON.stringify(bFiles)}`);
+    assert.strictEqual(cFiles.length, 0,
+      `C__*.json (pre-current-schema) must be swept even though "visited": ${JSON.stringify(cFiles)}`);
   });
 
   test('corrupt cache file returns undefined (does not throw)', async () => {
