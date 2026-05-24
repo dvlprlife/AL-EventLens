@@ -4,9 +4,9 @@ import { registerTreeView } from './ui/treeView';
 import { registerSubscriberTreeView } from './ui/subscriberTreeView';
 import { registerCodeLens } from './ui/codelens';
 import { runExportMermaid } from './commands/exportMermaid';
-import { registerSaveWatcher } from './index/watcher';
+import { registerSaveWatcher, resetWatcherStateForReload } from './index/watcher';
 import { registerWorkspaceFolderReindex } from './index/folderWatcher';
-import { hasAnyGenerationCommitted, runIndexAndCommit } from './index/reindex';
+import { resetExtensionStateForReload, runIndexAndCommit } from './index/reindex';
 import { EventIndexStore } from './index/store';
 import type { ObjectRef, Publisher, Subscriber } from './al/types';
 import { reviveRange } from './util/reviveLocation';
@@ -88,12 +88,14 @@ export function activate(context: vscode.ExtensionContext): void {
   // panel, tree, and CodeLens surfaces can render once it completes.
   // On failure, still mark the store initialized (with an empty index) so
   // the tree's `indexing…` placeholder progresses to the real empty-state
-  // message rather than spinning forever — but ONLY if NO build has
-  // committed yet. If a user-triggered Refresh overlapped this initial
-  // pass and successfully committed, `hasAnyGenerationCommitted()` is
-  // already true and the fallback would clobber real data. Conversely,
-  // if BOTH this initial pass AND a refresh fail, the flag stays false
-  // and the fallback still fires so the spinner clears.
+  // message rather than spinning forever — but ONLY if NO commit has
+  // landed yet. The `store.isInitialized` gate covers BOTH commit paths:
+  // a successful `runIndexAndCommit.set` (full pass) AND a successful
+  // `handleSave.updateFile` (save during a slow failing initial). If
+  // either has fired, the store already holds real data and the empty
+  // fallback would clobber it. If BOTH this initial pass AND a refresh
+  // fail with no save in between, `store.isInitialized` stays false and
+  // the fallback still fires so the spinner clears.
   const initial = runIndexAndCommit(context, store);
   initial.done
     .then(({ index, committed }) => {
@@ -105,12 +107,27 @@ export function activate(context: vscode.ExtensionContext): void {
     })
     .catch((err) => {
       console.error('AL EventLens: indexing failed', err);
-      if (!hasAnyGenerationCommitted()) {
+      // Parser-bug errors carry a recognizable marker prefix (see
+      // `indexer.ts`); surface them via a toast so the user actually
+      // notices and can file an issue. Transient I/O errors stay
+      // console-only — they're noisy and usually self-heal.
+      if (err instanceof Error && err.message.startsWith('[AL EventLens parser bug]')) {
+        void vscode.window.showErrorMessage(
+          `AL EventLens: parser bug — please file an issue. ${err.message}`
+        );
+      }
+      if (!store.isInitialized) {
         store.set({ publishers: [], subscribers: [], appMeta: new Map() });
       }
     });
 }
 
 export function deactivate(): void {
-  // nothing to clean up; all disposables are in context.subscriptions
+  // Reset module-scoped generation state so a subsequent `activate()`
+  // (Developer: Reload Window doesn't guarantee module re-instantiation)
+  // doesn't inherit stale tokens or Map entries from this session.
+  // Per-context disposables are in `context.subscriptions` and disposed
+  // by VS Code for us.
+  resetExtensionStateForReload();
+  resetWatcherStateForReload();
 }

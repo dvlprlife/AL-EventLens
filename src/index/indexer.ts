@@ -203,7 +203,16 @@ export async function buildIndex(
           `AL EventLens parser bug: parseAl threw on ${uri.fsPath} -- please report this`,
           err
         );
-        throw err;
+        // Wrap with a recognizable marker prefix so `extension.ts`'s
+        // activation catch can distinguish parser bugs from transient
+        // I/O errors and surface them via `showErrorMessage` — users
+        // never see the `console.error` above. Preserve the original
+        // error as `.cause` so a future inspector still has the stack.
+        const wrapped = new Error(
+          `[AL EventLens parser bug] ${err instanceof Error ? err.message : String(err)} (in ${uri.fsPath})`
+        );
+        (wrapped as { cause?: unknown }).cause = err;
+        throw wrapped;
       }
     }
   );

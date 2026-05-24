@@ -56,38 +56,18 @@ export function bumpStartedGeneration(): number {
 }
 
 /**
- * Module-scoped flag: has ANY `runIndexAndCommit` call successfully
- * committed to the store at least once? Used by the activation path's
- * empty-index fallback so the fallback fires when no build has landed
- * — even if a newer build is currently in flight and its predecessor
- * (this caller) lost the generation race AND threw.
+ * Reset this module's generation state. Called from `deactivate()` so a
+ * subsequent `activate()` (e.g. Developer: Reload Window where the JS
+ * module survives) starts from a clean counter rather than inheriting
+ * the previous activation's value — which would otherwise let a stale
+ * captured token from the prior session masquerade as current.
  *
- * Flips to `true` the first time `store.set(index)` actually runs
- * inside `runIndexAndCommit`; never flips back. Stays `false` if every
- * attempt either threw or was superseded.
+ * Production code other than `deactivate()` MUST NOT call this; doing so
+ * would invalidate every in-flight `runIndexAndCommit`'s captured token
+ * at once.
  */
-let anyGenerationCommitted = false;
-
-/**
- * Whether any `runIndexAndCommit` call has committed a built index to
- * the store. The activation path's failure handler uses this — instead
- * of `isLatestGeneration` — to decide whether to install the empty
- * fallback: if no build has committed, the spinner needs to clear; if
- * any build (even one whose generation token was later superseded) has
- * committed, the store already has real data and the fallback would
- * clobber it.
- */
-export function hasAnyGenerationCommitted(): boolean {
-  return anyGenerationCommitted;
-}
-
-/**
- * Test-only: reset the module-scoped `anyGenerationCommitted` flag so
- * tests that exercise the activation-failure path can do so in
- * isolation. Production code MUST NOT call this.
- */
-export function resetAnyGenerationCommittedForTesting(): void {
-  anyGenerationCommitted = false;
+export function resetExtensionStateForReload(): void {
+  latestStartedGeneration = 0;
 }
 
 /**
@@ -132,7 +112,6 @@ export function runIndexAndCommit(
   const done = indexFn(context).then((index): RunIndexResult => {
     if (generation === latestStartedGeneration) {
       store.set(index);
-      anyGenerationCommitted = true;
       return { index, committed: true };
     }
     return { index, committed: false };

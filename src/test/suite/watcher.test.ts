@@ -5,7 +5,12 @@ import type { ObjectRef, Publisher, Subscriber } from '../../al/types';
 import * as appJson from '../../index/appJson';
 import * as parser from '../../al/parser';
 import { EventIndexStore } from '../../index/store';
-import { __getSaveGenerationMapSize, handleSave, registerSaveWatcher } from '../../index/watcher';
+import {
+  __getSaveGenerationMapSize,
+  __hasSaveGenerationEntry,
+  handleSave,
+  registerSaveWatcher
+} from '../../index/watcher';
 
 // ─── Test harness for monkey-patching getConfiguration ───────────────────
 
@@ -312,6 +317,139 @@ suite('index/watcher: handleSave', () => {
     } finally {
       restoreDiscoverApps();
       restoreParseAl();
+      store.dispose();
+    }
+  });
+
+  test('parseAl throw still cleans up the per-URI Map entry (issue #119 defect 4)', async () => {
+    // The Map cleanup used to live on the success path AFTER
+    // `store.updateFile`. If `parseAl` (or any step between gen
+    // reservation and commit) threw, the rejection bubbled out, the
+    // `void handleSave(...)` wire discarded it, and the Map entry
+    // leaked forever — a long session full of parser bugs would grow
+    // the Map without bound.
+    //
+    // Post #119 the cleanup runs from a `finally` so it covers both
+    // success and throw paths. This test stubs `parseAl` to throw and
+    // asserts the entry is gone afterwards.
+    patchConfig({});
+    const uri = vscode.Uri.parse('file:///workspace/ParseThrows.al');
+    patchParseAl(() => { throw new Error('synthetic parser bug'); });
+    patchDiscoverApps(async () => []);
+
+    const store = new FakeStore();
+    try {
+      let threw = false;
+      try {
+        await handleSave(fakeDoc(uri, SAMPLE_CODEUNIT_AL), store);
+      } catch {
+        threw = true;
+      }
+      assert.strictEqual(threw, true,
+        'precondition: stubbed parseAl must propagate the throw out of handleSave');
+      assert.strictEqual(__hasSaveGenerationEntry(uri.toString()), false,
+        'Map entry for the saved URI must be cleared on the throw path — finally cleanup');
+      assert.strictEqual(store.calls.length, 0,
+        'no commit on the throw path');
+    } finally {
+      restoreParseAl();
+      restoreDiscoverApps();
+      store.dispose();
+    }
+  });
+
+  test('overtaken save (older token) cannot collide with a fresh post-cleanup reservation (issue #119 defect 2)', async () => {
+    // Defect 2: under the integer-counter scheme, a successful commit
+    // deleted the Map entry — and the NEXT reservation restarted at 1.
+    // If an EARLIER mid-flight handler A had `myGen=1` too, it could
+    // pass the bail check (`Map.get(key) !== myGen` → `1 !== 1` → false)
+    // and overwrite the fresh save's delta with stale text. With the
+    // Symbol-per-handler scheme this is structurally impossible —
+    // every reservation is a unique Symbol — so this test acts as a
+    // regression guard: simulate the A/B/C interleaving and assert A's
+    // text never lands.
+    //
+    // Timeline:
+    //   1. Save A starts, suspends in `discoverWorkspaceApps`.
+    //   2. Save B starts, suspends.
+    //   3. B resolves and commits (parseAl=B-text). Cleanup deletes the Map entry.
+    //   4. Save C starts (post-cleanup) and resolves immediately — would
+    //      under the integer scheme reserve `myGen=1`.
+    //   5. A's await unblocks. A must bail (token mismatch) and NOT
+    //      commit; C's text remains.
+    patchConfig({});
+    const uri = vscode.Uri.parse('file:///workspace/Collision.al');
+
+    const dA = deferred<unknown[]>();
+    const dB = deferred<unknown[]>();
+    const dC = deferred<unknown[]>();
+    let idx = 0;
+    patchDiscoverApps(async () => {
+      const which = idx++;
+      const d = which === 0 ? dA : which === 1 ? dB : dC;
+      return (await d.promise) as unknown as never;
+    });
+
+    const AL_C_BODY = [
+      'codeunit 50100 "Cu C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnEventC()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+
+    const store = new FakeStore();
+    try {
+      const sA = handleSave(fakeDoc(uri, [
+        'codeunit 50100 "Cu A"',
+        '{',
+        '    [IntegrationEvent(false, false)]',
+        '    procedure OnEventA()',
+        '    begin',
+        '    end;',
+        '}'
+      ].join('\n')), store);
+      const sB = handleSave(fakeDoc(uri, [
+        'codeunit 50100 "Cu B"',
+        '{',
+        '    [IntegrationEvent(false, false)]',
+        '    procedure OnEventB()',
+        '    begin',
+        '    end;',
+        '}'
+      ].join('\n')), store);
+
+      // Resolve B first — it wins, commits, cleans up the Map entry.
+      dB.resolve([]);
+      await sB;
+      assert.strictEqual(__hasSaveGenerationEntry(uri.toString()), false,
+        'precondition: B\'s successful commit must have cleaned up the Map entry');
+
+      // Start C AFTER B's cleanup. Under the old integer scheme C would
+      // get `myGen=1`, colliding with A's still-pending token.
+      const sC = handleSave(fakeDoc(uri, AL_C_BODY), store);
+      dC.resolve([]);
+      await sC;
+
+      // Now resume A. With Symbol tokens, A's token is stale (C has
+      // taken the slot, or has already cleaned up after itself), and A
+      // must bail — its text must NOT overwrite C's commit.
+      dA.resolve([]);
+      await sA;
+
+      // Three saves total, two of which committed (B and C). The
+      // important regression check is that A's `OnEventA` is NOT the
+      // final state of the store.
+      const finalNames = store.get().publishers.map((p) => p.eventName);
+      assert.ok(!finalNames.includes('OnEventA'),
+        `A's stale text must NOT have landed; got [${finalNames.join(', ')}]`);
+      // The latest committed save (C) must be reflected.
+      assert.ok(finalNames.includes('OnEventC'),
+        `C's commit must remain in the store; got [${finalNames.join(', ')}]`);
+    } finally {
+      restoreDiscoverApps();
       store.dispose();
     }
   });
