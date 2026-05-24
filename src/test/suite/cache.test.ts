@@ -329,18 +329,19 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
     }
   });
 
-  test('pruneOrphanCacheEntries removes entries for unvisited apps and pre-current-schema files', async () => {
+  test('pruneOrphanCacheEntries sweeps pre-current-schema files but spares current-schema files regardless of visited-keys membership', async () => {
     // Visited app A — current schema, must survive.
     await store(ctx, { appId: 'A', version: '1.0', mtime: 100 }, [
       makePublisher('A1', 'OnA')
     ]);
-    // Unvisited app B — current schema, must be deleted.
+    // Unvisited app B — current schema. Other workspaces may own this
+    // entry (globalStorageUri/symbols/ is shared across workspaces), so
+    // the narrowed classifier MUST keep it.
     await store(ctx, { appId: 'B', version: '1.0', mtime: 100 }, [
       makePublisher('B1', 'OnB')
     ]);
-    // Pre-current-schema (v4) file for app C — must be deleted even if
-    // we pretend C was visited, since the payload can't be loaded by
-    // the current code.
+    // Pre-current-schema (v4) file for app C — must be deleted; this
+    // is the only signal the sweep acts on.
     const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
     const cFile = vscode.Uri.joinPath(symbolsDir, 'C__1.0__100.json');
     await vscode.workspace.fs.writeFile(
@@ -355,7 +356,8 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
       }))
     );
 
-    // Only A is "visited" — B is an orphan, C is pre-current-schema.
+    // Only A is "visited" — B is unvisited but current-schema, C is
+    // pre-current-schema. With the narrowed classifier, only C goes.
     await pruneOrphanCacheEntries(ctx, new Set(['A__1.0']));
 
     const entries = await vscode.workspace.fs.readDirectory(symbolsDir);
@@ -365,10 +367,81 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
 
     assert.strictEqual(aFiles.length, 1,
       `A__*.json (visited, current schema) must survive: ${JSON.stringify(aFiles)}`);
-    assert.strictEqual(bFiles.length, 0,
-      `B__*.json (unvisited) must be swept: ${JSON.stringify(bFiles)}`);
+    assert.strictEqual(bFiles.length, 1,
+      `B__*.json (current schema, unknown key — owned by another workspace) must survive: ${JSON.stringify(bFiles)}`);
     assert.strictEqual(cFiles.length, 0,
-      `C__*.json (pre-current-schema) must be swept even though "visited": ${JSON.stringify(cFiles)}`);
+      `C__*.json (pre-current-schema) must be swept: ${JSON.stringify(cFiles)}`);
+  });
+
+  test('pruneOrphanCacheEntries with empty knownKeys does NOT wipe another workspace\'s cache', async () => {
+    // Simulate the cross-workspace cache wipe regression: workspace A
+    // populated the shared cache; workspace B opens with no
+    // .alpackages, so its buildIndex contributes an empty visitedKeys
+    // set. The sweep must leave workspace A's current-schema entries
+    // intact.
+    await store(ctx, { appId: 'A', version: '1.0', mtime: 100 }, [
+      makePublisher('A1', 'OnA')
+    ]);
+    await store(ctx, { appId: 'A2', version: '1.0', mtime: 100 }, [
+      makePublisher('A2-1', 'OnA2')
+    ]);
+
+    await pruneOrphanCacheEntries(ctx, new Set());
+
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    const entries = await vscode.workspace.fs.readDirectory(symbolsDir);
+    const aFiles = entries.filter(([name]) => name.startsWith('A__'));
+    const a2Files = entries.filter(([name]) => name.startsWith('A2__'));
+    assert.strictEqual(aFiles.length, 1,
+      `Workspace A's A__*.json must survive a sweep driven by another workspace's empty visitedKeys: ${JSON.stringify(entries)}`);
+    assert.strictEqual(a2Files.length, 1,
+      `Workspace A's A2__*.json must survive: ${JSON.stringify(entries)}`);
+  });
+
+  test('pruneOrphanCacheEntries spares current-schema files whose (appId, version) is not in knownKeys', async () => {
+    // A second workspace's cache entry, current schema, key not in
+    // knownKeys. The narrowed classifier must keep it.
+    await store(ctx, { appId: 'OtherWorkspace', version: '1.0', mtime: 100 }, [
+      makePublisher('OW1', 'OnOther')
+    ]);
+    // Pretend this run only visited a different app entirely.
+    await pruneOrphanCacheEntries(ctx, new Set(['Different__9.9']));
+
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    const entries = await vscode.workspace.fs.readDirectory(symbolsDir);
+    const otherFiles = entries.filter(([name]) => name.startsWith('OtherWorkspace__'));
+    assert.strictEqual(otherFiles.length, 1,
+      `Current-schema file whose key isn't in knownKeys must survive (it may belong to another workspace): ${JSON.stringify(entries)}`);
+  });
+
+  test('pruneOrphanCacheEntries treats unparseable / transient-failure files as skip-not-delete', async () => {
+    // A garbage-bytes file at a valid filename. The sweep used to
+    // classify any read/parse failure as orphan and delete the file;
+    // the narrowed classifier must skip on parse failure so a transient
+    // AV lock or network blip during the sweep doesn't evict a valid
+    // entry.
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const garbage = vscode.Uri.joinPath(symbolsDir, 'Transient__1.0__100.json');
+    await vscode.workspace.fs.writeFile(
+      garbage,
+      new TextEncoder().encode('this is not json {{{')
+    );
+    // Also a current-schema file alongside to confirm the loop keeps
+    // going past the skip.
+    await store(ctx, { appId: 'Healthy', version: '1.0', mtime: 100 }, [
+      makePublisher('H1', 'OnH')
+    ]);
+
+    await pruneOrphanCacheEntries(ctx, new Set(['Healthy__1.0']));
+
+    const entries = await vscode.workspace.fs.readDirectory(symbolsDir);
+    const transientFiles = entries.filter(([name]) => name.startsWith('Transient__'));
+    const healthyFiles = entries.filter(([name]) => name.startsWith('Healthy__'));
+    assert.strictEqual(transientFiles.length, 1,
+      `Unparseable file (proxy for a transient read/parse failure) must survive — only explicit schema-mismatch deletes: ${JSON.stringify(entries)}`);
+    assert.strictEqual(healthyFiles.length, 1,
+      `Current-schema file must survive alongside: ${JSON.stringify(entries)}`);
   });
 
   test('corrupt cache file returns undefined (does not throw)', async () => {
