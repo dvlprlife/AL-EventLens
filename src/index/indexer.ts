@@ -152,33 +152,60 @@ export async function buildIndex(
   // worker, not every file's text held at once. `parseAl` is pure given
   // `(uri, text, appId)`, so iterating the results in `alUris` order below
   // keeps the merged index deterministic regardless of read-completion
-  // order. Per-task `onError: 'skip'` isolates transient read failures
-  // (antivirus lock, sync client, file deleted between `findFiles` and
-  // `readFile`) so a single bad file logs a warn and the rest survive.
+  // order.
+  //
+  // Error handling is split into two layers because the two failure modes
+  // deserve different treatment (see issue #115):
+  //   1. Read failures (I/O errors) — transient and expected occasionally
+  //      (antivirus lock, sync client, file deleted between `findFiles`
+  //      and `readFile`). Caught inline, `console.warn`'d, slot returns
+  //      `undefined` so the rest of the index survives.
+  //   2. Parse failures (`parseAl` / `collectTriggerOwners` throwing) —
+  //      bugs in our code that should be loud. Caught only to log the
+  //      offending file path at error level, then re-thrown so the whole
+  //      `mapLimit` rejects and `buildIndex`'s extension-level `.catch`
+  //      surfaces the failure to the user instead of silently dropping
+  //      that file's events.
+  // No `onError: 'skip'` on the outer call — I/O errors are pre-swallowed
+  // inline, so the only rejections that can propagate are genuine parser
+  // bugs that we want to surface.
   const alFiles = await mapLimit(
     alUris,
     READ_CONCURRENCY,
-    async (uri): Promise<AlPassResult> => {
-      const text = decoder.decode(await vscode.workspace.fs.readFile(uri));
-      const appId = attributeToApp(uri, workspaceApps);
-      const parsed = parseAl(uri, text, appId);
-      let triggerOwnerEntries: WorkspaceTriggerOwner[] | undefined;
-      if (includeTriggerEvents) {
-        const ownerMap = new Map<string, ObjectRef>();
-        collectTriggerOwners(text, ownerMap, appId);
-        // Pair every collected owner with this file's URI so the synthesis
-        // step can tag the resulting publishers with `sourceUri` — the
-        // save-survival filter keys on it to evict the previous set on a
-        // subsequent save (see issue #107).
-        triggerOwnerEntries = [...ownerMap.values()].map((owner) => ({ owner, sourceUri: uri }));
+    async (uri): Promise<AlPassResult | undefined> => {
+      let text: string;
+      try {
+        text = decoder.decode(await vscode.workspace.fs.readFile(uri));
+      } catch (err) {
+        console.warn(`AL EventLens: failed to read .al file ${uri.fsPath}: ${err}`);
+        return undefined;
       }
-      return {
-        publishers: parsed.publishers,
-        subscribers: parsed.subscribers,
-        triggerOwnerEntries
-      };
-    },
-    { onError: 'skip', warnLabel: 'AL EventLens: failed to read .al file' }
+      try {
+        const appId = attributeToApp(uri, workspaceApps);
+        const parsed = parseAl(uri, text, appId);
+        let triggerOwnerEntries: WorkspaceTriggerOwner[] | undefined;
+        if (includeTriggerEvents) {
+          const ownerMap = new Map<string, ObjectRef>();
+          collectTriggerOwners(text, ownerMap, appId);
+          // Pair every collected owner with this file's URI so the synthesis
+          // step can tag the resulting publishers with `sourceUri` — the
+          // save-survival filter keys on it to evict the previous set on a
+          // subsequent save (see issue #107).
+          triggerOwnerEntries = [...ownerMap.values()].map((owner) => ({ owner, sourceUri: uri }));
+        }
+        return {
+          publishers: parsed.publishers,
+          subscribers: parsed.subscribers,
+          triggerOwnerEntries
+        };
+      } catch (err) {
+        console.error(
+          `AL EventLens parser bug: parseAl threw on ${uri.fsPath} -- please report this`,
+          err
+        );
+        throw err;
+      }
+    }
   );
   for (const result of alFiles) {
     if (!result) {
