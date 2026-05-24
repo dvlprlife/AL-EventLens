@@ -247,28 +247,42 @@ export function orphanCacheKey(appId: string, version: string): string {
 }
 
 /**
- * One-time orphan sweep over the `symbols/` cache directory. Removes any
- * cache file whose `(appId, version)` pair is not in `knownKeys` OR
- * whose payload's `schemaVersion` is not the current `SCHEMA_VERSION`.
- * Best-effort — individual delete failures and the readDirectory failure
- * are swallowed, never thrown.
+ * One-time schema-mismatch sweep over the `symbols/` cache directory.
+ * Deletes any cache file whose JSON parses successfully AND whose
+ * `schemaVersion` differs from the current `SCHEMA_VERSION`. Best-effort
+ * — individual delete failures and the readDirectory failure are
+ * swallowed, never thrown.
  *
  * Intended call site: tail of a successful `buildIndex` pass over
- * `.alpackages`, with `knownKeys` populated from every `(appId, version)`
- * pair visited that session (cache hit OR cache write). MUST NOT be
- * called on a partial / aborted build, since that would erase entries
- * for apps merely not visited yet.
+ * `.alpackages`. The sweep is intentionally narrow: it only acts on an
+ * EXPLICIT signal (a parse succeeded showing the wrong schemaVersion).
  *
- * `knownKeys` strings are the result of `orphanCacheKey(appId, version)`
- * — one entry per `(appId, version)` pair. A filename's key is derived
- * by stripping the trailing `__<mtime>.json`.
+ * - Current-schema files whose `(appId, version)` is not in `knownKeys`
+ *   SURVIVE. `globalStorageUri/symbols/` is shared across every
+ *   workspace the extension has ever indexed, but `knownKeys` only
+ *   covers packages visited by the workspace currently being indexed —
+ *   so a key-not-in-`knownKeys` classifier would wipe entries owned by
+ *   other workspaces. Same-`(appId, version)` stale-mtime dedup is
+ *   handled per-write by `storeCachedSymbols`; the sweep does not need
+ *   to compensate.
+ * - Transient `readFile` / `JSON.parse` failures during the sweep do
+ *   NOT delete the offending file. An AV lock, network-share blip, or
+ *   any other transient I/O error would otherwise cost the next session
+ *   a full re-parse for a perfectly valid cache entry.
+ *
+ * `knownKeys` is retained on the signature for API stability and is no
+ * longer used to drive deletion. `orphanCacheKey` is still exported for
+ * callers that want to construct one.
  *
  * No-op when caching is disabled, mirroring `loadCachedSymbols` /
  * `storeCachedSymbols`.
  */
 export async function pruneOrphanCacheEntries(
   context: vscode.ExtensionContext,
-  knownKeys: ReadonlySet<string>
+  // Retained on the signature for API stability; no longer drives
+  // deletion (see doc comment).
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _knownKeys: ReadonlySet<string>
 ): Promise<void> {
   if (!isCacheEnabled()) {
     return;
@@ -285,38 +299,24 @@ export async function pruneOrphanCacheEntries(
     if (fileType !== vscode.FileType.File || !name.endsWith('.json')) {
       continue;
     }
-    // Derive the `(appId, version)` key by stripping the trailing
-    // `__<mtime>.json` segment. A filename without the expected
-    // double-underscore + numeric mtime suffix is treated as an orphan
-    // — it cannot have been produced by the current `cacheFileUri`.
-    const baseName = name.slice(0, -'.json'.length);
-    const lastSep = baseName.lastIndexOf('__');
-    let key: string | undefined;
-    if (lastSep > 0) {
-      key = baseName.slice(0, lastSep);
-    }
 
-    let shouldDelete = false;
-    if (key === undefined || !knownKeys.has(key)) {
-      shouldDelete = true;
-    } else {
-      // Key matches a visited app — keep only if the payload is current
-      // schema. A malformed / unreadable file at a known key is also an
-      // orphan (it can't be loaded), so delete it too.
-      try {
-        const bytes = await vscode.workspace.fs.readFile(
-          vscode.Uri.joinPath(dir, name)
-        );
-        const parsed = JSON.parse(new TextDecoder().decode(bytes)) as unknown;
-        const sv = (parsed as { schemaVersion?: unknown } | null)?.schemaVersion;
-        if (sv !== SCHEMA_VERSION) {
-          shouldDelete = true;
-        }
-      } catch {
-        shouldDelete = true;
-      }
+    // Only an EXPLICIT schema-mismatch signal triggers a delete. Any
+    // read / parse failure is treated as a skip — it could be a
+    // transient AV lock, ENOENT between readDirectory and readFile, or
+    // a network share blip, and a delete in that case would cost the
+    // next session a full re-parse for a still-valid cache entry.
+    let parsed: unknown;
+    try {
+      const bytes = await vscode.workspace.fs.readFile(
+        vscode.Uri.joinPath(dir, name)
+      );
+      parsed = JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      // Transient I/O or unparseable file — skip, do not delete.
+      continue;
     }
-    if (!shouldDelete) {
+    const sv = (parsed as { schemaVersion?: unknown } | null)?.schemaVersion;
+    if (sv === SCHEMA_VERSION) {
       continue;
     }
     try {

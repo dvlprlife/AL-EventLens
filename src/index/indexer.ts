@@ -325,15 +325,20 @@ export async function buildIndex(
       }
       visitedKeys.add(orphanCacheKey(r.appId, r.appVersion));
     }
-    // Best-effort one-time orphan sweep — drops cache files for apps no
-    // longer present in `.alpackages` and any pre-current-schema files
-    // left behind by older releases. Runs only after Pass 2 finishes
-    // normally (any earlier throw skips this naturally); failures are
-    // logged but never block the index.
-    try {
-      await pruneOrphanCacheEntries(context, visitedKeys);
-    } catch (err) {
-      console.warn(`AL EventLens: cache orphan sweep failed: ${err}`);
+    // Best-effort one-time schema-mismatch sweep — drops any
+    // pre-current-schema cache files left behind by older releases.
+    // Runs only after Pass 2 finishes normally (any earlier throw skips
+    // this naturally); failures are logged but never block the index.
+    // Belt-and-suspenders: skip entirely when this workspace contributed
+    // no visited packages — there's nothing useful for the sweep to
+    // decide on, and `globalStorageUri/symbols/` is shared with other
+    // workspaces whose cached entries we must not touch.
+    if (visitedKeys.size > 0) {
+      try {
+        await pruneOrphanCacheEntries(context, visitedKeys);
+      } catch (err) {
+        console.warn(`AL EventLens: cache orphan sweep failed: ${err}`);
+      }
     }
   }
 
