@@ -267,10 +267,12 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     const html = renderPanelHtml('nonce123');
     assert.ok(/const MAX_LIST_ROWS\s*=\s*\d+/.test(html),
       'a MAX_LIST_ROWS cap constant must be defined');
-    assert.ok(html.includes('shown >= MAX_LIST_ROWS && k !== selectedKey'),
-      'renderList must stop appending past the cap, except the selected row');
-    assert.ok(html.includes('shown >= MAX_LIST_ROWS && k !== selectedSubKey'),
-      'renderSubscriberList must stop appending past the cap, except the selected row');
+    assert.ok(html.includes('shown >= MAX_LIST_ROWS && k === selectedKey'),
+      'renderList must mark the selected past-cap row as a cap exception');
+    assert.ok(html.includes('shown >= MAX_LIST_ROWS && k === selectedSubKey'),
+      'renderSubscriberList must mark the selected past-cap row as a cap exception');
+    assert.ok(html.includes('shown >= MAX_LIST_ROWS && !isCapException'),
+      'past-cap rows that are not the cap exception must be dropped');
     assert.ok(html.includes("'Showing ' + shown + ' of ' + total"),
       'a capped list must append a notice row showing rendered-of-total counts');
   });
@@ -289,6 +291,76 @@ suite('ui/panelHtml: renderPanelHtml', () => {
       'rebuildSubscribersIndex must populate a subKey-keyed index');
     assert.ok(html.includes('subscribersBySubKey.get(selectedSubKey)'),
       'renderSubscriberDetail must use the index for an O(1) lookup');
+  });
+
+  test('a line-shifting fileUpdate relocates the selected subscriber by line-insensitive identity (defect 1)', () => {
+    // The fileUpdate handler must call relocateSelectedSubKey() after
+    // rebuildSubscribersIndex() so a save that shifts the [EventSubscriber]
+    // attribute's line still resolves to the same subscriber. The relocator
+    // matches on (owner.kind, owner.name, target.kind, target.name,
+    // targetEvent, path) — every subKey component except the line.
+    const html = renderPanelHtml('nonce123');
+    assert.ok(html.includes('function subIdentityKey(s)'),
+      'a line-insensitive identity helper must be defined for the relocator');
+    assert.ok(html.includes('function relocateSelectedSubKey()'),
+      'the post-fileUpdate relocator helper must be defined');
+    assert.ok(/relocateSelectedSubKey\(\)/.test(html),
+      'the fileUpdate handler must call relocateSelectedSubKey() after rebuildSubscribersIndex()');
+    // The relocator must clear the selection on zero or multiple matches so
+    // the detail pane resets cleanly instead of getting stuck on a stale key.
+    assert.ok(/selectedSubKey\s*=\s*null/.test(html),
+      'relocateSelectedSubKey must null the selection when no unambiguous match exists');
+  });
+
+  test('the "Showing X of Y" notice never reports more than MAX_LIST_ROWS for either list (defect 3)', () => {
+    // The cap-exception path lets the selected past-cap row render, but the
+    // shown counter must not advance for it — otherwise the notice reports
+    // MAX_LIST_ROWS + 1, which is wrong (the user already sees N capped rows
+    // plus a separately-rendered selected row).
+    const html = renderPanelHtml('nonce123');
+    // The cap-exception branch is now tracked in a separate counter that
+    // does NOT contribute to `shown` — appears in both renderList and
+    // renderSubscriberList.
+    const capCounterMatches = html.match(/capExceptionRendered/g) ?? [];
+    assert.ok(capCounterMatches.length >= 4,
+      `both lists must track cap-exception renders in a dedicated counter (got ${capCounterMatches.length} mentions; expected >= 4 for two lists)`);
+    // The cap notice must compare total against the sum of shown + cap-exception
+    // (or otherwise gate so the notice only fires when truly more rows were filtered out).
+    assert.ok(/total > shown \+ capExceptionRendered/.test(html),
+      'the cap-notice gate must consider the cap-exception render so the notice only fires when extra rows exist');
+  });
+
+  test('select handler renders before findLiByKey so past-cap rows get a highlight (defect 2)', () => {
+    // Without rendering first, findLiByKey returns null for a past-cap row
+    // because the DOM was built around the OLD selectedKey. The 'reveal'
+    // handler already does this (assigns selectKey, then renders); the
+    // 'select' handler now mirrors that pattern.
+    const html = renderPanelHtml('nonce123');
+    // Find the 'select' branch and assert it assigns selectedKey + renders
+    // BEFORE looking up the LI in the DOM.
+    const selectBranch = html.split("m.type === 'select'")[1] ?? '';
+    const elseAfter = selectBranch.split('} else if')[0];
+    assert.ok(/selectedKey\s*=\s*newKey/.test(elseAfter),
+      "the 'select' handler must assign selectedKey before rendering");
+    const renderIdx = elseAfter.indexOf('render()');
+    const findLiIdx = elseAfter.indexOf('findLiByKey(newKey)');
+    assert.ok(renderIdx !== -1, "the 'select' handler must call render()");
+    assert.ok(findLiIdx !== -1, "the 'select' handler must call findLiByKey");
+    assert.ok(renderIdx < findLiIdx,
+      "the 'select' handler must call render() BEFORE findLiByKey so a past-cap row is materialized");
+  });
+
+  test('applyToken clears objectIdentity when the app dropdown changes, not just the kind dropdown (defect 4)', () => {
+    // The Kind dropdown and the App dropdown both invalidate a prior
+    // identity selector — picking a different app makes the tree-revealed
+    // `codeunit::"Sales-Post"` stale because Sales-Post may not exist in
+    // the new app. Clearing keeps the dropdowns and the free-text search
+    // logically consistent.
+    const html = renderPanelHtml('nonce123');
+    // The clear branch now covers both 'kind' and 'app' tokens.
+    assert.ok(/tokenKey === 'kind' \|\| tokenKey === 'app'/.test(html)
+        || /tokenKey === 'app' \|\| tokenKey === 'kind'/.test(html),
+      'applyToken must clear objectIdentity for BOTH the kind and app token keys');
   });
 });
 
