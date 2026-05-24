@@ -38,11 +38,28 @@ const READ_CONCURRENCY = 16;
 interface AlPassResult {
   readonly publishers: Publisher[];
   readonly subscribers: Subscriber[];
-  /** Trigger-owner ObjectRefs collected from this file's Tables and Pages.
+  /** Trigger-owner ObjectRefs collected from this file's Tables and Pages,
+   *  each paired with the declaring file's URI so the synthesis step can
+   *  tag the resulting publishers with `sourceUri` (lets the save-survival
+   *  filter evict them on a subsequent save instead of accumulating
+   *  duplicates — see issue #107).
    *  `undefined` when `includeTriggerEvents` is false (the worker skips
    *  the work entirely); a per-file dedup map is flattened into an array
    *  for the sequential merge to fold into the global map. */
-  readonly triggerOwnerEntries: ObjectRef[] | undefined;
+  readonly triggerOwnerEntries: WorkspaceTriggerOwner[] | undefined;
+}
+
+/** Pairing of a workspace-pass trigger-owner ObjectRef with the URI of the
+ *  `.al` file that declared it. Used to feed `synthesizeTriggerPublishers`
+ *  with a non-undefined `sourceUri` so the save-survival filter can replace
+ *  these synthesized publishers cleanly on re-save (see issue #107). `.app`-
+ *  bundled trigger owners deliberately do NOT carry a `sourceUri` — they
+ *  have no workspace source file, so their `undefined` sourceUri means a
+ *  workspace save can never evict them (correct: bundled triggers must
+ *  survive a workspace-side save). */
+interface WorkspaceTriggerOwner {
+  readonly owner: ObjectRef;
+  readonly sourceUri: vscode.Uri;
 }
 
 /** One `.alpackages/*.app`'s parsed contribution — produced in parallel by
@@ -92,11 +109,15 @@ export async function buildIndex(
   const publishers: Publisher[] = [];
   const subscribers: Subscriber[] = [];
   const appMeta = new Map<string, AppMeta>();
-  // One global dedup map across the entire pipeline. The key includes the
-  // owning appId so identically-named objects in different packages are not
-  // collapsed, but case-insensitive on name (matching the resolver) so a
-  // package that bundles two spellings of "Item" / "ITEM" yields one owner.
-  // The `__workspace__` sentinel covers the bare workspace pass.
+  // Two dedup maps, one per source-axis, so the synthesis step can tag
+  // workspace-pass triggers with `sourceUri` while `.app`-bundled triggers
+  // stay un-tagged (their `sourceUri` must remain undefined so a workspace
+  // save can never evict them — see issue #107). Keys are the same shape
+  // (`appId|kind|name`, name lower-cased, `__workspace__` sentinel for loose
+  // `.al` files under no `app.json`), so the synthesis loop can detect a key
+  // present in both maps and prefer the workspace entry (workspace source
+  // strictly supersedes the compiled package, per CLAUDE.md).
+  const workspaceTriggerOwners = new Map<string, WorkspaceTriggerOwner>();
   const triggerOwners = new Map<string, ObjectRef>();
   const decoder = new TextDecoder('utf-8');
 
@@ -141,11 +162,15 @@ export async function buildIndex(
       const text = decoder.decode(await vscode.workspace.fs.readFile(uri));
       const appId = attributeToApp(uri, workspaceApps);
       const parsed = parseAl(uri, text, appId);
-      let triggerOwnerEntries: ObjectRef[] | undefined;
+      let triggerOwnerEntries: WorkspaceTriggerOwner[] | undefined;
       if (includeTriggerEvents) {
         const ownerMap = new Map<string, ObjectRef>();
         collectTriggerOwners(text, ownerMap, appId);
-        triggerOwnerEntries = [...ownerMap.values()];
+        // Pair every collected owner with this file's URI so the synthesis
+        // step can tag the resulting publishers with `sourceUri` — the
+        // save-survival filter keys on it to evict the previous set on a
+        // subsequent save (see issue #107).
+        triggerOwnerEntries = [...ownerMap.values()].map((owner) => ({ owner, sourceUri: uri }));
       }
       return {
         publishers: parsed.publishers,
@@ -162,10 +187,15 @@ export async function buildIndex(
     publishers.push(...result.publishers);
     subscribers.push(...result.subscribers);
     if (result.triggerOwnerEntries) {
-      for (const owner of result.triggerOwnerEntries) {
-        const key = triggerOwnerKey(owner);
-        if (!triggerOwners.has(key)) {
-          triggerOwners.set(key, owner);
+      // First-write-wins dedup (matches the pre-existing semantics) so the
+      // surviving entry is the one whose `sourceUri` points at the FIRST
+      // `.al` file that declared the Table/Page — deterministic in
+      // `alUris` order. Subsequent declarations (rare; duplicate-id error
+      // for the user's AL compiler) are skipped silently.
+      for (const entry of result.triggerOwnerEntries) {
+        const key = triggerOwnerKey(entry.owner);
+        if (!workspaceTriggerOwners.has(key)) {
+          workspaceTriggerOwners.set(key, entry);
         }
       }
     }
@@ -309,7 +339,21 @@ export async function buildIndex(
 
   if (includeTriggerEvents) {
     progress?.report({ message: 'Synthesizing trigger publishers' });
-    for (const owner of triggerOwners.values()) {
+    // Workspace-pass triggers first, tagged with the declaring `.al` URI so
+    // the save-survival filter can evict the previous set on a subsequent
+    // save (see issue #107).
+    for (const entry of workspaceTriggerOwners.values()) {
+      publishers.push(...synthesizeTriggerPublishers(entry.owner, entry.sourceUri));
+    }
+    // `.app`-bundled triggers next, NOT tagged with a `sourceUri` (these
+    // have no workspace source file; `undefined` is what keeps them safe
+    // from workspace-save eviction). Skip any key already contributed by
+    // the workspace pass — workspace source supersedes the compiled twin
+    // per CLAUDE.md.
+    for (const [key, owner] of triggerOwners) {
+      if (workspaceTriggerOwners.has(key)) {
+        continue;
+      }
       publishers.push(...synthesizeTriggerPublishers(owner));
     }
   }
