@@ -1590,6 +1590,112 @@ suite('index/indexer: buildIndex', () => {
       'otherwise the tree drops the workspace-first sort and root-folder icon');
   });
 
+  // ─── #115: Pass-1 error handling — read vs parse split ─────────────────
+
+  test('Pass 1: a transient readFile failure skips that file silently (warn) and the rest of the index still builds', async () => {
+    // Regression: the read-failure leg of the split must preserve PR #106's
+    // intended behavior — one bad I/O does not abort buildIndex.
+    const goodUri = vscode.Uri.parse('file:///workspace/Good.al');
+    const badUri = vscode.Uri.parse('file:///workspace/Bad.al');
+    const fs: FakeFs = {
+      bytes: new Map([
+        [goodUri.toString(), encode(SAMPLE_CODEUNIT_AL)]
+        // badUri intentionally absent — see overridden readFile below
+      ])
+    };
+    applyPatches({
+      alFiles: [goodUri, badUri],
+      appFiles: [],
+      fs,
+      includeTriggerEvents: false
+    });
+    // Wrap the patched fs so badUri throws on read. Other reads pass through.
+    const previousFs = vscode.workspace.fs;
+    const wrappedFs = {
+      ...previousFs,
+      readFile: async (uri: vscode.Uri): Promise<Uint8Array> => {
+        if (uri.toString() === badUri.toString()) {
+          throw new Error('synthetic: EBUSY');
+        }
+        return previousFs.readFile(uri);
+      }
+    } as typeof vscode.workspace.fs;
+    Object.defineProperty(vscode.workspace, 'fs', { configurable: true, value: wrappedFs });
+
+    const idx = await buildIndex(fakeContext());
+
+    // The good file's publisher must still appear — buildIndex did not abort.
+    assert.ok(idx.publishers.some((p) => p.eventName === 'OnAfterFoo'),
+      'good file publisher must still appear when a sibling read failed');
+    // A warn referencing the failing file's path must have been emitted.
+    const readWarn = warnCalls.find((m) => m.includes('Bad.al') && m.includes('failed to read'));
+    assert.ok(readWarn,
+      `expected a warn mentioning Bad.al and "failed to read"; got: ${JSON.stringify(warnCalls)}`);
+  });
+
+  test('Pass 1: a parseAl exception aborts buildIndex and logs at error level with the file path (issue #115)', async () => {
+    // The post-#106 silent-swallow defect: a parser bug used to be lost in
+    // a console.warn. It must now propagate so the user sees the failure
+    // through the extension-level .catch, AND the file path must reach
+    // console.error so the bug is filable.
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const fs: FakeFs = {
+      bytes: new Map([[cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)]])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [],
+      fs,
+      includeTriggerEvents: false
+    });
+    // Monkey-patch the parser module's `parseAl` export so the indexer's
+    // `parser_1.parseAl(...)` call site goes through our throwing stub.
+    // The override is restored after the test by capturing the original
+    // and reinstalling it in this test's teardown.
+    /* eslint-disable @typescript-eslint/no-var-requires */
+    const parserModule = require('../../al/parser') as {
+      parseAl: (uri: vscode.Uri, text: string, appId?: string) => unknown;
+    };
+    /* eslint-enable @typescript-eslint/no-var-requires */
+    const originalParseAl = parserModule.parseAl;
+    const SYNTHETIC_PARSER_BUG = new Error('synthetic: catastrophic regex backtracking');
+    parserModule.parseAl = (): never => { throw SYNTHETIC_PARSER_BUG; };
+
+    // Capture console.error so we can assert on the bug-report message.
+    const originalConsoleError = console.error;
+    const errorCalls: string[] = [];
+    Object.defineProperty(console, 'error', {
+      configurable: true,
+      writable: true,
+      value: (...args: unknown[]): void => {
+        errorCalls.push(args.map((a) => String(a)).join(' '));
+      }
+    });
+
+    try {
+      let caught: unknown;
+      try {
+        await buildIndex(fakeContext());
+      } catch (err) {
+        caught = err;
+      }
+      assert.strictEqual(caught, SYNTHETIC_PARSER_BUG,
+        'buildIndex must reject with the original parser exception so the extension-level .catch surfaces it');
+      const bugLog = errorCalls.find((m) =>
+        m.includes('AL EventLens parser bug') && m.includes('MyCodeunit.al')
+      );
+      assert.ok(bugLog,
+        `expected console.error to mention "AL EventLens parser bug" and the file path; got: ${JSON.stringify(errorCalls)}`);
+    } finally {
+      parserModule.parseAl = originalParseAl;
+      Object.defineProperty(console, 'error', {
+        configurable: true,
+        writable: true,
+        value: originalConsoleError
+      });
+    }
+  });
+
   test('resolver regression: a workspace subscriber stays resolved after gaining an owner.appId', async () => {
     // SAMPLE_CODEUNIT_AL has an IntegrationEvent and a same-file subscriber.
     // Attributing the file to a project gives the subscriber's owner an
