@@ -100,6 +100,36 @@ suite('symbols/schemaFlat: happy path', () => {
     assert.strictEqual(byKind.get('xmlport'), 'OnXml');
     assert.strictEqual(byKind.get('interface'), 'OnIface');
   });
+
+  test('extracts events from TableExtensions and PageExtensions', () => {
+    // Regression for issue #123: BC `tableextension`/`pageextension` objects
+    // can legally declare `[IntegrationEvent]`/`[BusinessEvent]` procedures,
+    // and those ARE preserved in `SymbolReference.json` under the
+    // `TableExtensions[]` / `PageExtensions[]` array keys (confirmed against a
+    // real BC 28 Base Application package: 109 such publishers). They were
+    // previously dropped because `CONTAINER_KINDS` omitted both keys.
+    const json = {
+      TableExtensions: [
+        {
+          Id: 50700,
+          Name: 'My Table Ext',
+          Methods: [{ Name: 'OnTableExt', Attributes: [{ Name: 'IntegrationEvent' }] }]
+        }
+      ],
+      PageExtensions: [
+        {
+          Id: 50800,
+          Name: 'My Page Ext',
+          Methods: [{ Name: 'OnPageExt', Attributes: [{ Name: 'BusinessEvent' }] }]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.strictEqual(publishers.length, 2);
+    const byKind = new Map(publishers.map((p) => [p.owner.kind, p.eventName]));
+    assert.strictEqual(byKind.get('tableextension'), 'OnTableExt');
+    assert.strictEqual(byKind.get('pageextension'), 'OnPageExt');
+  });
 });
 
 suite('symbols/schemaFlat: filtering', () => {
