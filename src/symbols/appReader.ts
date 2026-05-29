@@ -43,6 +43,20 @@ const MAX_TOTAL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024; // 512 MB per package
 const MAX_BUNDLED_ENTRY_COUNT = 50_000; // bundled src/**/*.al entry count
 
 /**
+ * Overridable decompression bounds for `parseAppBytes`. Production callers omit
+ * this and get the module defaults above; tests inject small values to exercise
+ * the cap logic without materializing huge inputs (50k entries / hundreds of MB).
+ */
+export interface DecompressionLimits {
+  /** Per-entry declared-uncompressed-size cap, in bytes. */
+  readonly maxEntryBytes?: number;
+  /** Cumulative declared-uncompressed-size cap across all read entries, in bytes. */
+  readonly maxTotalBytes?: number;
+  /** Maximum number of bundled AL source entries (the `src/` `.al` files). */
+  readonly maxEntryCount?: number;
+}
+
+/**
  * Read the declared uncompressed size of a loaded zip entry from JSZip's
  * private `_data` (a `CompressedObject`) without resorting to `any`
  * (`@typescript-eslint/no-explicit-any` is an error in this repo). JSZip 3.x
@@ -125,8 +139,12 @@ export async function parseAppMetadataBytes(
  */
 export async function parseAppBytes(
   bytes: Uint8Array,
-  sourceLabel: string
+  sourceLabel: string,
+  limits?: DecompressionLimits
 ): Promise<AppContents> {
+  const maxEntryBytes = limits?.maxEntryBytes ?? MAX_ENTRY_UNCOMPRESSED_BYTES;
+  const maxTotalBytes = limits?.maxTotalBytes ?? MAX_TOTAL_UNCOMPRESSED_BYTES;
+  const maxEntryCount = limits?.maxEntryCount ?? MAX_BUNDLED_ENTRY_COUNT;
   const zip = await openNavxZip(bytes, sourceLabel, 'readApp');
   const { appId, version, name, appPublisher } = await readManifest(zip, sourceLabel, 'readApp');
 
@@ -141,10 +159,10 @@ export async function parseAppBytes(
   // SymbolReference.json plus every bundled source so a "many medium entries"
   // bomb is caught even when no single entry trips the per-entry cap.
   const symbolSize = declaredUncompressedSize(symbolEntry);
-  if (symbolSize !== undefined && symbolSize > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+  if (symbolSize !== undefined && symbolSize > maxEntryBytes) {
     throw new Error(
       `readApp: SymbolReference.json declares ${symbolSize} uncompressed bytes, ` +
-      `exceeding the ${MAX_ENTRY_UNCOMPRESSED_BYTES}-byte per-entry cap; refusing to ` +
+      `exceeding the ${maxEntryBytes}-byte per-entry cap; refusing to ` +
       `decompress (possible zip bomb) (source=${sourceLabel})`
     );
   }
@@ -161,25 +179,25 @@ export async function parseAppBytes(
       continue;
     }
     entryCount++;
-    if (entryCount > MAX_BUNDLED_ENTRY_COUNT) {
+    if (entryCount > maxEntryCount) {
       throw new Error(
-        `readApp: bundled source entry count exceeds the ${MAX_BUNDLED_ENTRY_COUNT}-entry ` +
+        `readApp: bundled source entry count exceeds the ${maxEntryCount}-entry ` +
         `cap; refusing to decompress (possible zip bomb) (source=${sourceLabel})`
       );
     }
     const entrySize = declaredUncompressedSize(entry);
     if (entrySize !== undefined) {
-      if (entrySize > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+      if (entrySize > maxEntryBytes) {
         throw new Error(
           `readApp: bundled source ${path} declares ${entrySize} uncompressed bytes, ` +
-          `exceeding the ${MAX_ENTRY_UNCOMPRESSED_BYTES}-byte per-entry cap; refusing to ` +
+          `exceeding the ${maxEntryBytes}-byte per-entry cap; refusing to ` +
           `decompress (possible zip bomb) (source=${sourceLabel})`
         );
       }
       totalBytes += entrySize;
-      if (totalBytes > MAX_TOTAL_UNCOMPRESSED_BYTES) {
+      if (totalBytes > maxTotalBytes) {
         throw new Error(
-          `readApp: cumulative uncompressed size exceeds the ${MAX_TOTAL_UNCOMPRESSED_BYTES}-byte ` +
+          `readApp: cumulative uncompressed size exceeds the ${maxTotalBytes}-byte ` +
           `cap (reached ${totalBytes} bytes at ${path}); refusing to decompress ` +
           `(possible zip bomb) (source=${sourceLabel})`
         );
