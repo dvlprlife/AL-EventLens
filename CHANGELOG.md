@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Fixed
+
+- Event publishers declared inside `tableextension` / `pageextension` objects in dependency `.app` packages were silently dropped from the index (`src/symbols/schemaFlat.ts`). `CONTAINER_KINDS` enumerated the base object kinds but omitted the `TableExtensions[]` / `PageExtensions[]` arrays that `SymbolReference.json` uses for extension objects, so every `[IntegrationEvent]` / `[BusinessEvent]` published from a compiled extension object was missing — even though the same publisher was indexed correctly from open workspace `.al` source. The two keys are now enumerated alongside the base kinds, and because the legacy flat parser and the BC 24+ nested `Namespaces[]` walk share this single enumeration, both schema surfaces are fixed. (Verified against a real BC 28 Microsoft Base Application `SymbolReference.json`: the array keys are exactly `TableExtensions` / `PageExtensions`, and 109 `[IntegrationEvent]` publishers live inside extension objects there.)
+
 ## [0.1.4] - 2026-05-24
 
 ### Added
