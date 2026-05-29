@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { AppMeta, EventKind, ObjectKind, Publisher, Subscriber } from '../../al/types';
 import { EventIndexStore } from '../../index/store';
-import { EventTreeDataProvider, type TreeNode } from '../../ui/treeView';
+import { EventTreeDataProvider, registerTreeView, type TreeNode } from '../../ui/treeView';
 
 // ─── Fixtures (mirrors store.test.ts shape) ─────────────────────────────
 
@@ -264,6 +264,13 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       } finally {
         sub.dispose();
       }
+
+      // The provider exposes dispose() that tears down its emitter (mirroring
+      // the CodeLens provider). Disposing twice must be safe / not throw.
+      assert.strictEqual(typeof provider.dispose, 'function',
+        'EventTreeDataProvider must implement dispose()');
+      provider.dispose();
+      provider.dispose();
     } finally {
       store.dispose();
     }
@@ -815,6 +822,48 @@ suite('ui/treeView: EventTreeDataProvider', () => {
       assert.strictEqual(roots[0].label, 'Solo Project',
         'single-root workspace shows the app.json name instead of `(workspace)`');
     } finally {
+      store.dispose();
+    }
+  });
+});
+
+suite('ui/treeView: registerTreeView', () => {
+  test('returned Disposable includes the provider so disposing tears down its emitter; double-dispose is safe (defect 3)', () => {
+    const store = new EventIndexStore();
+    // Stub createTreeView so the test can capture the provider that
+    // registerTreeView builds internally without exporting it.
+    const originalCreateTreeView = vscode.window.createTreeView;
+    let captured: EventTreeDataProvider | undefined;
+    (vscode.window as { createTreeView: typeof vscode.window.createTreeView }).createTreeView = ((
+      _viewId: string,
+      options: { treeDataProvider: EventTreeDataProvider }
+    ) => {
+      captured = options.treeDataProvider;
+      // Minimal stand-in so the `Disposable.from(view, ...)` chain holds.
+      return { dispose: () => {} } as unknown as vscode.TreeView<TreeNode>;
+    }) as typeof vscode.window.createTreeView;
+
+    let registration: vscode.Disposable | undefined;
+    try {
+      registration = registerTreeView(store);
+      assert.ok(captured, 'registerTreeView must hand its provider to createTreeView');
+      const provider = captured!;
+
+      assert.strictEqual(typeof provider.dispose, 'function',
+        'EventTreeDataProvider must implement dispose()');
+
+      // Disposing the registration (which includes the provider) must not
+      // throw, and a second dispose must be safe too.
+      registration.dispose();
+      registration.dispose();
+
+      // After disposal the provider's emitter is torn down; firing refresh()
+      // must not throw on the disposed emitter.
+      provider.refresh();
+    } finally {
+      registration?.dispose();
+      (vscode.window as { createTreeView: typeof vscode.window.createTreeView }).createTreeView =
+        originalCreateTreeView;
       store.dispose();
     }
   });

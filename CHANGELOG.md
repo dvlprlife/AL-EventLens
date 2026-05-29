@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Fixed
+
+- UI/webview polish bundle (`src/ui/panel.ts`, `src/ui/subscriberTreeView.ts`, `src/ui/treeView.ts`). The Subscribers tree tooltip now shows a clean file path for subscribers parsed from a packaged `.app`'s bundled source instead of a backslash-mangled, scheme-stripped one — `Uri.fsPath` is used only for `file:` URIs; the synthetic `al-eventlens-app:` scheme falls back to `Uri.path` (matching the panel webview's existing guard). Export Mermaid invoked from the command palette after a Refresh no longer exports against a stale, dropped publisher — the cached panel selection is cleared on a full re-index. Re-opening the webview panel no longer leaks the previous disposed panel into the extension's disposable set, both activity-bar tree providers now dispose their `onDidChangeTreeData` emitter on shutdown (mirroring the CodeLens provider), and the webview CSP script nonce is now generated with `crypto.getRandomValues` rather than `Math.random()`.
+
 ## [0.1.4] - 2026-05-24
 
 ### Added

@@ -181,6 +181,12 @@ export class SubscriberTreeDataProvider implements vscode.TreeDataProvider<SubTr
     this._onDidChangeTreeData.fire();
   }
 
+  /** Dispose the change-event emitter on shutdown. Mirrors the CodeLens
+   *  provider; included in `registerSubscriberTreeView`'s `Disposable.from`. */
+  public dispose(): void {
+    this._onDidChangeTreeData.dispose();
+  }
+
   public getTreeItem(node: SubTreeNode): vscode.TreeItem {
     if (node.kind === 'indexing') {
       const item = new vscode.TreeItem(
@@ -232,7 +238,13 @@ export class SubscriberTreeDataProvider implements vscode.TreeDataProvider<SubTr
       vscode.TreeItemCollapsibleState.None
     );
     const loc = s.location;
-    const fileLine = `${loc.uri.fsPath}:${loc.range.start.line + 1}`;
+    // `Uri.fsPath` is meaningful only for `file:` URIs. Subscribers parsed
+    // from a packaged `.app`'s bundled source carry the synthetic
+    // `al-eventlens-app:` scheme (see indexer.ts), whose `.fsPath` getter
+    // strips the scheme and backslash-mangles the POSIX path on Windows —
+    // and is meaningless on VS Code Web. Fall back to the clean `.path`.
+    const filePath = loc.uri.scheme === 'file' ? loc.uri.fsPath : loc.uri.path;
+    const fileLine = `${filePath}:${loc.range.start.line + 1}`;
     item.tooltip = [
       `Owner: ${ownerLabel(s)}`,
       `Target: ${targetLabel(s)} · ${s.targetEvent}`,
@@ -297,5 +309,5 @@ export function registerSubscriberTreeView(store: EventIndexStore): vscode.Dispo
   // Refresh on both a full re-index and an incremental file save.
   const sub = store.onDidChange(() => provider.refresh());
   const fileSub = store.onDidUpdateFile(() => provider.refresh());
-  return vscode.Disposable.from(view, sub, fileSub);
+  return vscode.Disposable.from(view, sub, fileSub, provider);
 }

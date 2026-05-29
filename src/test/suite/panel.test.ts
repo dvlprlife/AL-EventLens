@@ -142,6 +142,44 @@ suite('ui/panelHtml: renderPanelHtml', () => {
       'CSP meta tag must be present');
   });
 
+  test('two successive openPanel renders embed distinct 32-char nonces from the alphabet (defect 5)', () => {
+    // makeNonce now draws from crypto.getRandomValues (a CSPRNG global in
+    // both the desktop and web extension hosts) rather than Math.random().
+    // makeNonce isn't exported, so assert through the rendered HTML the panel
+    // sets on its webview — shape + variability only, never randomness strength.
+    patchCreate();
+    const store = new EventIndexStore();
+    function extractNonce(html: string): string {
+      const m = /<script\b[^>]*nonce="([^"]+)"/.exec(html);
+      assert.ok(m, 'rendered HTML must carry a nonce on the inline <script>');
+      return m![1];
+    }
+    try {
+      openPanel(fakeContext, store);
+      const firstHtml = createCalls[0].panel.webview.html as string;
+      const firstNonce = extractNonce(firstHtml);
+      assert.ok(/^[A-Za-z0-9]{32}$/.test(firstNonce),
+        `nonce must be 32 chars from the alphabet; got "${firstNonce}"`);
+      // The same nonce must also appear in the CSP script-src directive.
+      assert.ok(firstHtml.includes(`'nonce-${firstNonce}'`),
+        'the CSP meta must reference the same nonce in script-src');
+
+      // Close and reopen — the second panel must get a different nonce.
+      createCalls[0].fireDispose();
+      openPanel(fakeContext, store);
+      const secondNonce = extractNonce(createCalls[1].panel.webview.html as string);
+      assert.ok(/^[A-Za-z0-9]{32}$/.test(secondNonce),
+        `second nonce must be 32 chars from the alphabet; got "${secondNonce}"`);
+      assert.notStrictEqual(firstNonce, secondNonce,
+        'a fresh panel must get a freshly generated nonce');
+      // Dispose the second panel so activePanel doesn't leak into later tests.
+      createCalls[1].fireDispose();
+    } finally {
+      restoreCreate();
+      store.dispose();
+    }
+  });
+
   test('returns a self-contained document with no external resources', () => {
     const html = renderPanelHtml('nonce123');
     assert.ok(/^<!doctype html>/i.test(html), 'starts with <!doctype html>');
@@ -670,6 +708,70 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
       fake.fireDispose();
       assert.strictEqual(getSelectedPublisher(), undefined,
         'getSelectedPublisher() should return undefined after the panel is disposed');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('repeated open/close does not accumulate panel disposables in context.subscriptions (defect 1)', () => {
+    // openPanel no longer pushes the WebviewPanel into context.subscriptions —
+    // its lifecycle is fully managed by onDidDispose + the activePanel guard.
+    // Use a dedicated context so the shared fakeContext isn't polluted.
+    patchCreate();
+    const localContext = {
+      subscriptions: [] as vscode.Disposable[],
+      extension: { id: 'dvlprlife.al-eventlens' }
+    } as unknown as vscode.ExtensionContext;
+    const store = new EventIndexStore();
+    try {
+      assert.strictEqual(localContext.subscriptions.length, 0,
+        'precondition: subscriptions starts empty');
+
+      // Open / close three cycles.
+      for (let i = 0; i < 3; i++) {
+        openPanel(localContext, store);
+        createCalls[createCalls.length - 1].fireDispose();
+      }
+
+      assert.strictEqual(localContext.subscriptions.length, 0,
+        'openPanel must not push the panel into context.subscriptions on any cycle');
+    } finally {
+      restoreCreate();
+      store.dispose();
+    }
+  });
+
+  test('a full re-index (onDidChange) clears the cached selection; an incremental save (onDidUpdateFile) does not (defect 4)', () => {
+    patchCreate();
+    const store = new EventIndexStore();
+    try {
+      openPanel(fakeContext, store);
+      const fake = createCalls[0];
+
+      // Select a publisher via the webview round-trip.
+      const pub = makePublisher('Sales-Post', 'OnAfterPostSalesDoc');
+      fake.fireReceive({ type: 'selectionChanged', publisher: pub });
+      assert.strictEqual(getSelectedPublisher(), pub,
+        'precondition: selection is set after selectionChanged');
+
+      // An incremental save (onDidUpdateFile) preserves the selection by design.
+      store.updateFile(
+        vscode.Uri.parse('file:///workspace/Other.al'),
+        [makePublisher('Other', 'OnOther')],
+        []
+      );
+      assert.strictEqual(getSelectedPublisher(), pub,
+        'incremental save must NOT clear the cached selection');
+
+      // A full re-index (onDidChange via store.set) clears the selection so
+      // Export Mermaid from the palette can no longer export a dropped publisher.
+      store.set({
+        publishers: [makePublisher('Brand New', 'OnFresh')],
+        subscribers: [],
+        appMeta: new Map()
+      });
+      assert.strictEqual(getSelectedPublisher(), undefined,
+        'full re-index must clear the cached selection');
     } finally {
       store.dispose();
     }

@@ -11,9 +11,16 @@ let selectedPublisher: Publisher | undefined;
 const NONCE_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
 
 function makeNonce(): string {
+  // `crypto.getRandomValues` is a global in both the desktop extension host
+  // (Node 18+ exposes `globalThis.crypto`) and the VS Code Web extension host;
+  // do NOT `import` Node's `crypto` module — it's unavailable on the web host.
+  const bytes = new Uint8Array(32);
+  globalThis.crypto.getRandomValues(bytes);
   let out = '';
-  for (let i = 0; i < 32; i++) {
-    out += NONCE_ALPHABET.charAt(Math.floor(Math.random() * NONCE_ALPHABET.length));
+  for (let i = 0; i < bytes.length; i++) {
+    // Modulo bias over the 62-char alphabet from a 256-value byte is
+    // negligible for a CSP nonce and not security-relevant here.
+    out += NONCE_ALPHABET.charAt(bytes[i] % NONCE_ALPHABET.length);
   }
   return out;
 }
@@ -25,6 +32,12 @@ function makeNonce(): string {
  * when items are clicked.
  */
 export function openPanel(context: vscode.ExtensionContext, store: EventIndexStore): void {
+  // `context` is part of the call-site contract (`extension.ts` passes it) but
+  // the panel's lifecycle is fully self-managed — `onDidDispose` clears module
+  // state and disposes `storeListener`, and the `activePanel` guard below
+  // prevents a second live panel — so it is no longer pushed into
+  // `context.subscriptions`. Mirror `registerCodeLens`'s `void context;` idiom.
+  void context;
   if (activePanel) {
     activePanel.reveal(activePanel.viewColumn ?? vscode.ViewColumn.Beside);
     return;
@@ -49,6 +62,13 @@ export function openPanel(context: vscode.ExtensionContext, store: EventIndexSto
 
   storeListener = vscode.Disposable.from(
     store.onDidChange((idx) => {
+      // Full re-index replaces the entire publisher set, so any cached
+      // host-side selection may now point at a publisher the user can no
+      // longer see. Clear it so `getSelectedPublisher()` (e.g. Export
+      // Mermaid from the command palette) doesn't resolve against a stale,
+      // dropped clone. The incremental `onDidUpdateFile` path below
+      // deliberately preserves the selection across a line-shifting save.
+      selectedPublisher = undefined;
       void panel.webview.postMessage({
         type: 'index',
         publishers: idx.publishers,
@@ -92,7 +112,6 @@ export function openPanel(context: vscode.ExtensionContext, store: EventIndexSto
   });
 
   activePanel = panel;
-  context.subscriptions.push(panel);
 }
 
 /**

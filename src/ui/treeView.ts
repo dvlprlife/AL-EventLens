@@ -234,6 +234,12 @@ export class EventTreeDataProvider implements vscode.TreeDataProvider<TreeNode> 
     this._onDidChangeTreeData.fire();
   }
 
+  /** Dispose the change-event emitter on shutdown. Mirrors the CodeLens
+   *  provider; included in `registerTreeView`'s `Disposable.from`. */
+  public dispose(): void {
+    this._onDidChangeTreeData.dispose();
+  }
+
   private counts(): ReadonlyMap<string, number> {
     if (!this._counts) {
       this._counts = countSubscribersByPublisherKey(this.store.get().subscribers);
@@ -359,5 +365,5 @@ export function registerTreeView(store: EventIndexStore): vscode.Disposable {
   // Refresh on both a full re-index and an incremental file save.
   const sub = store.onDidChange(() => provider.refresh());
   const fileSub = store.onDidUpdateFile(() => provider.refresh());
-  return vscode.Disposable.from(view, sub, fileSub);
+  return vscode.Disposable.from(view, sub, fileSub, provider);
 }

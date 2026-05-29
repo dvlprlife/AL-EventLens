@@ -142,6 +142,54 @@ suite('ui/subscriberTreeView: SubscriberTreeDataProvider', () => {
     }
   });
 
+  test('subscriber leaf tooltip uses uri.path for a synthetic al-eventlens-app: URI, and fsPath for a file: URI (defect 2)', () => {
+    const store = new EventIndexStore();
+    try {
+      // A subscriber parsed from a packaged .app's bundled source carries the
+      // synthetic `al-eventlens-app:` scheme (created in indexer.ts). Its
+      // `.fsPath` getter would strip the scheme and backslash-mangle the POSIX
+      // path on Windows; the tooltip must fall back to the clean `.path`.
+      const appUri = vscode.Uri.parse('al-eventlens-app:/Some.AppId/src/Subscribers/Foo Sub.al');
+      const fileUri = vscode.Uri.parse('file:///workspace/proj/Bar Sub.al');
+      store.set({
+        publishers: [],
+        subscribers: [
+          makeSubscriber({ kind: 'codeunit', name: 'Foo Sub' }, { kind: 'codeunit', name: 'Sales-Post' }, 'OnAfterPost', { uri: appUri, line: 41 }),
+          makeSubscriber({ kind: 'codeunit', name: 'Bar Sub' }, { kind: 'codeunit', name: 'Purch-Post' }, 'OnAfterPurch', { uri: fileUri, line: 7 })
+        ],
+        appMeta: new Map()
+      });
+
+      const provider = new SubscriberTreeDataProvider(store);
+      const tooltipByName = new Map<string, string>();
+      const [appNode] = provider.getChildren() as SubTreeNode[];
+      const [kindNode] = provider.getChildren(appNode) as SubTreeNode[];
+      const objectNodes = provider.getChildren(kindNode) as SubTreeNode[];
+      for (const obj of objectNodes) {
+        const [leaf] = provider.getChildren(obj) as SubTreeNode[];
+        tooltipByName.set(
+          (obj as Extract<SubTreeNode, { kind: 'object' }>).objectName,
+          provider.getTreeItem(leaf).tooltip as string
+        );
+      }
+
+      const appTooltip = tooltipByName.get('Foo Sub')!;
+      // Clean forward-slash path from uri.path, scheme stripped, line 41+1.
+      assert.ok(appTooltip.includes('/Some.AppId/src/Subscribers/Foo Sub.al:42'),
+        `synthetic-URI tooltip must use the clean uri.path; got: ${appTooltip}`);
+      // Must NOT be the backslash-mangled / scheme-stripped fsPath form.
+      assert.ok(!appTooltip.includes(appUri.fsPath),
+        `synthetic-URI tooltip must NOT use fsPath; fsPath was ${appUri.fsPath}`);
+
+      const fileTooltip = tooltipByName.get('Bar Sub')!;
+      // A real file: URI still uses fsPath (unchanged behavior).
+      assert.ok(fileTooltip.includes(`${fileUri.fsPath}:8`),
+        `file: tooltip must still use fsPath; got: ${fileTooltip}`);
+    } finally {
+      store.dispose();
+    }
+  });
+
   test('kind and object nodes show a `(N)` subscriber count', () => {
     const store = new EventIndexStore();
     try {
@@ -339,9 +387,19 @@ suite('ui/subscriberTreeView: SubscriberTreeDataProvider', () => {
         // Direct refresh() still fires onDidChangeTreeData on the captured provider.
         provider.refresh();
         assert.strictEqual(fired, 3, 'direct refresh() must also fire onDidChangeTreeData');
+
+        // The provider exposes a dispose() that tears down its emitter
+        // (mirroring the CodeLens provider).
+        assert.strictEqual(typeof provider.dispose, 'function',
+          'SubscriberTreeDataProvider must implement dispose()');
       } finally {
         evt.dispose();
       }
+
+      // The returned Disposable must include the provider so disposing the
+      // registration disposes the emitter too. Disposing twice must be safe.
+      registration.dispose();
+      registration.dispose();
     } finally {
       registration?.dispose();
       (vscode.window as { createTreeView: typeof vscode.window.createTreeView }).createTreeView =
