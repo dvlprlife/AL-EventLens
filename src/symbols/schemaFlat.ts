@@ -3,7 +3,9 @@ import type { EventKind, ObjectKind, Parameter, Publisher } from '../al/types';
 const CONTAINER_KINDS: ReadonlyArray<readonly [string, ObjectKind]> = [
   ['Codeunits', 'codeunit'],
   ['Tables', 'table'],
+  ['TableExtensions', 'tableextension'],
   ['Pages', 'page'],
+  ['PageExtensions', 'pageextension'],
   ['Reports', 'report'],
   ['Queries', 'query'],
   ['XmlPorts', 'xmlport'],
