@@ -177,9 +177,13 @@ suite('ui/subscriberTreeView: SubscriberTreeDataProvider', () => {
       // Clean forward-slash path from uri.path, scheme stripped, line 41+1.
       assert.ok(appTooltip.includes('/Some.AppId/src/Subscribers/Foo Sub.al:42'),
         `synthetic-URI tooltip must use the clean uri.path; got: ${appTooltip}`);
-      // Must NOT be the backslash-mangled / scheme-stripped fsPath form.
-      assert.ok(!appTooltip.includes(appUri.fsPath),
-        `synthetic-URI tooltip must NOT use fsPath; fsPath was ${appUri.fsPath}`);
+      // Must be the clean forward-slash form, never backslash-mangled.
+      // (On POSIX `uri.fsPath === uri.path`, so an `!includes(fsPath)` check is
+      // not portable — it fails on Linux/macOS CI where the two are identical.
+      // Assert there is no backslash instead; the pre-fix code produced a
+      // backslash-mangled path from `fsPath` on Windows.)
+      assert.ok(!appTooltip.includes('\\'),
+        `synthetic-URI tooltip must not be backslash-mangled; got: ${appTooltip}`);
 
       const fileTooltip = tooltipByName.get('Bar Sub')!;
       // A real file: URI still uses fsPath (unchanged behavior).
