@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Fixed
+
+- A `.al` file save during an in-flight workspace-folder-change re-index no longer silently drops the rebuild (`src/index/folderWatcher.ts`). Adding a workspace folder kicks off a full re-scan; if the user saved a file before that scan finished, the save's generation bump suppressed the rebuild's commit (last-started-wins), so the newly-added folder's publishers/subscribers never appeared until a manual Refresh. The folder-change watcher now inspects the `committed` flag already returned by `runIndexAndCommit` and, when its rebuild was superseded, re-issues exactly one fresh full rebuild — guarded by a per-change sequence counter so a *newer* folder change (which commits on its own) cancels the stale re-issue and the re-issued run never arms a further one, leaving no possibility of a rebuild loop.
+
 ## [0.1.4] - 2026-05-24
 
 ### Added
