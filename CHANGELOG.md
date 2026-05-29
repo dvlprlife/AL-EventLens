@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Changed
+
+- CodeLens now caches the workspace-wide subscriber-count map per store generation instead of rebuilding it on every `provideCodeLenses` call (`src/ui/codelens.ts`). VS Code calls `provideCodeLenses` per visible `al` editor on every edit, scroll, and config change; each call recomputed the full publisher-key → subscriber-count map — O(total subscribers), tens of thousands at BaseApp scale. The map is now computed lazily and invalidated in `fireChange()`, the single point every count-changing signal (full re-index, incremental save, setting toggle) already routes through — mirroring the existing `EventTreeDataProvider` cache. The per-document `parseAl` stays per-call.
+
 ## [0.1.4] - 2026-05-24
 
 ### Added

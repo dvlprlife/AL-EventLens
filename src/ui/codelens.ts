@@ -12,19 +12,36 @@ import type { EventIndexStore } from '../index/store';
  * Trigger publishers (`kind: 'trigger'`) carry no source location and
  * are skipped — they have nothing to draw above.
  *
- * The lens title is computed eagerly in `provideCodeLenses` (counts are
- * cheap), so there is intentionally no `resolveCodeLens` override.
+ * The lens title is computed eagerly in `provideCodeLenses`, so there is
+ * intentionally no `resolveCodeLens` override. The workspace-wide
+ * publisher-key → subscriber-count map is cached per store generation
+ * (see `counts()` / `fireChange()`) so VS Code's per-edit, per-scroll
+ * `provideCodeLenses` calls do not rebuild it each time.
  */
 export class AlEventLensCodeLensProvider implements vscode.CodeLensProvider {
   private readonly _onDidChangeCodeLenses = new vscode.EventEmitter<void>();
   public readonly onDidChangeCodeLenses = this._onDidChangeCodeLenses.event;
+  /** Cached publisher-key → subscriber-count map for the current store state.
+   *  Invalidated in `fireChange()`; recomputed lazily on first access per cycle. */
+  private _counts?: ReadonlyMap<string, number>;
 
   constructor(private readonly store: EventIndexStore) {}
 
   /** Trigger a re-fetch from VS Code; called when the store changes or
    *  the gating setting toggles. */
   public fireChange(): void {
+    this._counts = undefined;
     this._onDidChangeCodeLenses.fire();
+  }
+
+  /** Lazily compute the workspace-wide publisher-key → subscriber-count map
+   *  for the current store generation, reused across `provideCodeLenses`
+   *  calls until `fireChange()` invalidates it. */
+  private counts(): ReadonlyMap<string, number> {
+    if (!this._counts) {
+      this._counts = countSubscribersByPublisherKey(this.store.get().subscribers);
+    }
+    return this._counts;
   }
 
   public provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
@@ -43,7 +60,7 @@ export class AlEventLensCodeLensProvider implements vscode.CodeLensProvider {
       return [];
     }
 
-    const counts = countSubscribersByPublisherKey(this.store.get().subscribers);
+    const counts = this.counts();
 
     const lenses: vscode.CodeLens[] = [];
     for (const p of parsed.publishers) {
