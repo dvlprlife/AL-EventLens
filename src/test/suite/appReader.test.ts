@@ -13,22 +13,30 @@ const SAMPLE_SYMBOL_REFERENCE = JSON.stringify({ AppId: 'x', Codeunits: [] });
 async function buildAppBytes(opts: {
   withManifest?: boolean;
   withSymbolReference?: boolean;
+  symbolReferenceText?: string;
   bundledFiles?: Record<string, string>;
   manifestXml?: string;
   prefixMagic?: ReadonlyArray<number>;
   prefixSize?: number;
+  /** Use DEFLATE so a highly-compressible multi-MB string yields a tiny `.app`
+   *  whose central directory still *declares* the full uncompressed size. */
+  compress?: boolean;
 } = {}): Promise<Uint8Array> {
   const zip = new JSZip();
   if (opts.withManifest !== false) {
     zip.file('NavxManifest.xml', opts.manifestXml ?? SAMPLE_MANIFEST);
   }
   if (opts.withSymbolReference !== false) {
-    zip.file('SymbolReference.json', SAMPLE_SYMBOL_REFERENCE);
+    zip.file('SymbolReference.json', opts.symbolReferenceText ?? SAMPLE_SYMBOL_REFERENCE);
   }
   for (const [path, content] of Object.entries(opts.bundledFiles ?? {})) {
     zip.file(path, content);
   }
-  const zipBytes: Uint8Array = await zip.generateAsync({ type: 'uint8array' });
+  const zipBytes: Uint8Array = await zip.generateAsync(
+    opts.compress
+      ? { type: 'uint8array', compression: 'DEFLATE' }
+      : { type: 'uint8array' }
+  );
 
   const headerSize = opts.prefixSize ?? 40;
   const out = new Uint8Array(headerSize + zipBytes.length);
@@ -150,6 +158,85 @@ suite('symbols/appReader: parseAppBytes error paths', () => {
       parseAppBytes(bytes, 'memory://bad-manifest.app'),
       /missing Id or Version attribute/
     );
+  });
+});
+
+suite('symbols/appReader: decompression caps (zip-bomb defense)', () => {
+  // Mirrors the (non-exported) caps in appReader.ts. Kept in sync by intent:
+  // the tests below craft entries that clear these exact thresholds.
+  const MAX_ENTRY_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
+  const MAX_TOTAL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
+  const MAX_BUNDLED_ENTRY_COUNT = 50_000;
+
+  test('rejects a SymbolReference.json that declares more than the per-entry cap', async function () {
+    // ~256 MB of a single repeated char compresses to a few hundred KB, so the
+    // crafted `.app` stays tiny on disk while its central directory declares the
+    // full uncompressed size. The guard fires BEFORE `.async`, so the payload is
+    // never inflated — only the declared size matters.
+    this.timeout(30000);
+    const big = 'A'.repeat(MAX_ENTRY_UNCOMPRESSED_BYTES + 1);
+    const bytes = await buildAppBytes({ symbolReferenceText: big, compress: true });
+    await assert.rejects(
+      parseAppBytes(bytes, 'memory://bomb-symbol.app'),
+      /possible zip bomb/
+    );
+    await assert.rejects(
+      parseAppBytes(bytes, 'memory://bomb-symbol.app'),
+      /SymbolReference\.json declares .* per-entry cap/
+    );
+  });
+
+  test('rejects when bundled sources exceed the cumulative cap', async function () {
+    // Each bundled entry declares 200 MB (< the 256 MB per-entry cap), but three
+    // of them sum to 600 MB (> the 512 MB cumulative cap). A single shared source
+    // string keeps the test to one large allocation.
+    this.timeout(30000);
+    const perEntry = 200 * 1024 * 1024;
+    assert.ok(perEntry < MAX_ENTRY_UNCOMPRESSED_BYTES, 'per-entry must stay under the per-entry cap');
+    assert.ok(perEntry * 3 > MAX_TOTAL_UNCOMPRESSED_BYTES, 'three entries must exceed the cumulative cap');
+    const big = 'B'.repeat(perEntry);
+    const bytes = await buildAppBytes({
+      bundledFiles: { 'src/a.al': big, 'src/b.al': big, 'src/c.al': big },
+      compress: true
+    });
+    await assert.rejects(
+      parseAppBytes(bytes, 'memory://bomb-cumulative.app'),
+      /cumulative uncompressed size exceeds/
+    );
+    await assert.rejects(
+      parseAppBytes(bytes, 'memory://bomb-cumulative.app'),
+      /possible zip bomb/
+    );
+  });
+
+  test('rejects when the bundled entry count exceeds the cap', async function () {
+    // The count check fires before any inflation, so many tiny entries are cheap.
+    this.timeout(30000);
+    const bundledFiles: Record<string, string> = {};
+    for (let i = 0; i <= MAX_BUNDLED_ENTRY_COUNT; i++) {
+      bundledFiles[`src/f${i}.al`] = 'x';
+    }
+    const bytes = await buildAppBytes({ bundledFiles });
+    await assert.rejects(
+      parseAppBytes(bytes, 'memory://bomb-count.app'),
+      /bundled source entry count exceeds/
+    );
+    await assert.rejects(
+      parseAppBytes(bytes, 'memory://bomb-count.app'),
+      /possible zip bomb/
+    );
+  });
+
+  test('accepts a normal package unchanged (caps do not reject legitimate apps)', async () => {
+    const bytes = await buildAppBytes({
+      bundledFiles: {
+        'src/Sales.Codeunit.al': 'codeunit 50100 "Sales" { }',
+        'src/Customer.Page.al': 'page 50200 "Cust" { }'
+      }
+    });
+    const contents = await parseAppBytes(bytes, 'memory://normal.app');
+    assert.strictEqual(contents.appId, '437dbf0e-84ff-417a-965d-ed2bb9650972');
+    assert.strictEqual(contents.bundledAlSources.length, 2);
   });
 });
 

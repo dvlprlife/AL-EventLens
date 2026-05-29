@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded `.app` decompression to prevent a crafted dependency package from exhausting extension-host memory (`src/symbols/appReader.ts`). `readApp` materialized every `.app`'s `SymbolReference.json` and bundled `src/**/*.al` into JS strings with no size bound, so a few-KB zip-bomb `.app` in `.alpackages` whose entries declared multi-GB uncompressed sizes could OOM/hang the host. `parseAppBytes` now reads each entry's declared uncompressed size from the zip central directory (via JSZip's `_data.uncompressedSize`, read defensively) and rejects before inflating when a single entry exceeds 256 MB, the cumulative total exceeds 512 MB, or the bundled-entry count exceeds 50,000. The per-package `try/catch` in the indexer skips the one bad package and logs a clear "possible zip bomb" message; legitimate packages (including Microsoft BaseApp) are unaffected.
+
 ## [0.1.4] - 2026-05-24
 
 ### Added
