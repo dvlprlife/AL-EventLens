@@ -162,67 +162,60 @@ suite('symbols/appReader: parseAppBytes error paths', () => {
 });
 
 suite('symbols/appReader: decompression caps (zip-bomb defense)', () => {
-  // Mirrors the (non-exported) caps in appReader.ts. Kept in sync by intent:
-  // the tests below craft entries that clear these exact thresholds.
-  const MAX_ENTRY_UNCOMPRESSED_BYTES = 256 * 1024 * 1024;
-  const MAX_TOTAL_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
-  const MAX_BUNDLED_ENTRY_COUNT = 50_000;
+  // The production caps (256 MB / 512 MB / 50,000) are large by design, so these
+  // tests inject small `limits` into `parseAppBytes` to exercise the cap LOGIC
+  // with tiny inputs rather than materializing huge zips — building 50k entries
+  // or hundreds of MB ran ~25-30s and flaked against the mocha timeout on the
+  // Windows CI runner (issue #139). The guards read each entry's DECLARED
+  // uncompressed size and fire before `.async`, so nothing is ever inflated.
+  // The production defaults are exercised by the "accepts a normal package" test.
 
-  test('rejects a SymbolReference.json that declares more than the per-entry cap', async function () {
-    // ~256 MB of a single repeated char compresses to a few hundred KB, so the
-    // crafted `.app` stays tiny on disk while its central directory declares the
-    // full uncompressed size. The guard fires BEFORE `.async`, so the payload is
-    // never inflated — only the declared size matters.
-    this.timeout(30000);
-    const big = 'A'.repeat(MAX_ENTRY_UNCOMPRESSED_BYTES + 1);
-    const bytes = await buildAppBytes({ symbolReferenceText: big, compress: true });
+  test('rejects a SymbolReference.json that declares more than the per-entry cap', async () => {
+    // 65-byte symbol vs an injected 64-byte per-entry cap.
+    const bytes = await buildAppBytes({ symbolReferenceText: 'A'.repeat(65) });
     await assert.rejects(
-      parseAppBytes(bytes, 'memory://bomb-symbol.app'),
+      parseAppBytes(bytes, 'memory://bomb-symbol.app', { maxEntryBytes: 64 }),
       /possible zip bomb/
     );
     await assert.rejects(
-      parseAppBytes(bytes, 'memory://bomb-symbol.app'),
+      parseAppBytes(bytes, 'memory://bomb-symbol.app', { maxEntryBytes: 64 }),
       /SymbolReference\.json declares .* per-entry cap/
     );
   });
 
-  test('rejects when bundled sources exceed the cumulative cap', async function () {
-    // Each bundled entry declares 200 MB (< the 256 MB per-entry cap), but three
-    // of them sum to 600 MB (> the 512 MB cumulative cap). A single shared source
-    // string keeps the test to one large allocation.
-    this.timeout(30000);
-    const perEntry = 200 * 1024 * 1024;
-    assert.ok(perEntry < MAX_ENTRY_UNCOMPRESSED_BYTES, 'per-entry must stay under the per-entry cap');
-    assert.ok(perEntry * 3 > MAX_TOTAL_UNCOMPRESSED_BYTES, 'three entries must exceed the cumulative cap');
-    const big = 'B'.repeat(perEntry);
+  test('rejects when bundled sources exceed the cumulative cap', async () => {
+    // Each entry stays under the (high) per-entry cap, but the 40-byte symbol
+    // plus the first 80-byte bundled entry sum past the injected 100-byte
+    // cumulative cap.
     const bytes = await buildAppBytes({
-      bundledFiles: { 'src/a.al': big, 'src/b.al': big, 'src/c.al': big },
-      compress: true
+      symbolReferenceText: 'S'.repeat(40),
+      bundledFiles: { 'src/a.al': 'A'.repeat(80), 'src/b.al': 'B'.repeat(80) }
     });
+    const limits = { maxEntryBytes: 1000, maxTotalBytes: 100 };
     await assert.rejects(
-      parseAppBytes(bytes, 'memory://bomb-cumulative.app'),
+      parseAppBytes(bytes, 'memory://bomb-cumulative.app', limits),
       /cumulative uncompressed size exceeds/
     );
     await assert.rejects(
-      parseAppBytes(bytes, 'memory://bomb-cumulative.app'),
+      parseAppBytes(bytes, 'memory://bomb-cumulative.app', limits),
       /possible zip bomb/
     );
   });
 
-  test('rejects when the bundled entry count exceeds the cap', async function () {
-    // The count check fires before any inflation, so many tiny entries are cheap.
-    this.timeout(30000);
+  test('rejects when the bundled entry count exceeds the cap', async () => {
+    // 4 tiny entries vs an injected count cap of 3; the count check fires before
+    // any inflation, so this is instant.
     const bundledFiles: Record<string, string> = {};
-    for (let i = 0; i <= MAX_BUNDLED_ENTRY_COUNT; i++) {
+    for (let i = 0; i <= 3; i++) {
       bundledFiles[`src/f${i}.al`] = 'x';
     }
     const bytes = await buildAppBytes({ bundledFiles });
     await assert.rejects(
-      parseAppBytes(bytes, 'memory://bomb-count.app'),
+      parseAppBytes(bytes, 'memory://bomb-count.app', { maxEntryCount: 3 }),
       /bundled source entry count exceeds/
     );
     await assert.rejects(
-      parseAppBytes(bytes, 'memory://bomb-count.app'),
+      parseAppBytes(bytes, 'memory://bomb-count.app', { maxEntryCount: 3 }),
       /possible zip bomb/
     );
   });
