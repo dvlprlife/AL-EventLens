@@ -328,6 +328,111 @@ suite('ui/codelens: AlEventLensCodeLensProvider.provideCodeLenses', () => {
   });
 });
 
+suite('ui/codelens: subscriber-count cache', () => {
+  teardown(() => restoreConfig());
+
+  test('builds the count map once across multiple provideCodeLenses calls, then once more after fireChange()', () => {
+    patchConfig({});
+    const store = new EventIndexStore();
+    try {
+      store.set({
+        publishers: [],
+        appMeta: new Map(),
+        subscribers: [
+          makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo'),
+          makeSubscriber('codeunit', 'my codeunit', 'onafterfoo'),
+          makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo')
+        ]
+      });
+
+      // Count store reads: the lazy `counts()` accessor calls `store.get()`
+      // exactly once per generation, so the count tracks cache builds.
+      const realGet = store.get.bind(store);
+      let gets = 0;
+      Object.defineProperty(store, 'get', {
+        configurable: true,
+        value: () => {
+          gets++;
+          return realGet();
+        }
+      });
+
+      const provider = new AlEventLensCodeLensProvider(store);
+      const doc = fakeDoc(vscode.Uri.parse('file:///workspace/MyCodeunit.al'), TWO_PUBLISHERS_AL);
+
+      const expectTitles = (lenses: vscode.CodeLens[]): void => {
+        const titles = lenses.map((l) => l.command?.title).sort();
+        assert.deepStrictEqual(titles, ['0 subscribers', '3 subscribers'],
+          'OnAfterFoo gets 3, OnBeforeBar gets 0 — must stay correct across cached calls');
+      };
+
+      expectTitles(provider.provideCodeLenses(doc));
+      expectTitles(provider.provideCodeLenses(doc));
+      expectTitles(provider.provideCodeLenses(doc));
+      assert.strictEqual(gets, 1,
+        'count map must be built lazily once and reused across provideCodeLenses calls');
+
+      provider.fireChange();
+      expectTitles(provider.provideCodeLenses(doc));
+      assert.strictEqual(gets, 2,
+        'fireChange() must invalidate the cache so the next call rebuilds exactly once');
+
+      provider.dispose();
+    } finally {
+      // Drop the own-property override so the prototype `get` resurfaces.
+      delete (store as unknown as { get?: unknown }).get;
+      store.dispose();
+    }
+  });
+
+  test('stale-count regression: a store change driving fireChange() yields the new count, not the cached one', () => {
+    patchConfig({});
+    const store = new EventIndexStore();
+    try {
+      const provider = new AlEventLensCodeLensProvider(store);
+      // Mirror registerCodeLens's wiring: store.onDidChange → provider.fireChange().
+      const sub = store.onDidChange(() => provider.fireChange());
+      const doc = fakeDoc(vscode.Uri.parse('file:///workspace/MyCodeunit.al'), TWO_PUBLISHERS_AL);
+
+      const fooTitle = (): string | undefined => {
+        const lenses = provider.provideCodeLenses(doc);
+        // OnAfterFoo is the integration publisher; find its lens by the
+        // non-zero count (OnBeforeBar always has 0 here).
+        return lenses.map((l) => l.command?.title).find((t) => t !== '0 subscribers')
+          ?? lenses[0]?.command?.title;
+      };
+
+      try {
+        store.set({
+          publishers: [],
+          appMeta: new Map(),
+          subscribers: [makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo')]
+        });
+        // Prime the cache.
+        assert.strictEqual(fooTitle(), '1 subscriber', 'initial count must be 1');
+
+        // Mutate the store: onDidChange → fireChange() must clear the cache.
+        store.set({
+          publishers: [],
+          appMeta: new Map(),
+          subscribers: [
+            makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo'),
+            makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo'),
+            makeSubscriber('codeunit', 'My Codeunit', 'OnAfterFoo')
+          ]
+        });
+        assert.strictEqual(fooTitle(), '3 subscribers',
+          'after a store change the lens must reflect the new count, not the cached one');
+      } finally {
+        sub.dispose();
+      }
+      provider.dispose();
+    } finally {
+      store.dispose();
+    }
+  });
+});
+
 suite('ui/codelens: AlEventLensCodeLensProvider.onDidChangeCodeLenses', () => {
   test('fires when the store mutates (via the wiring from registerCodeLens)', () => {
     const store = new EventIndexStore();
