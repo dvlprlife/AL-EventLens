@@ -95,6 +95,41 @@ suite('symbols/schemaNamespaces: happy path', () => {
     assert.strictEqual(kinds.get('table'), 'OnTable');
     assert.strictEqual(kinds.get('page'), 'OnPage');
   });
+
+  test('extracts TableExtension / PageExtension events through the nested walk', () => {
+    // Regression for issue #123: the nested `Namespaces[]` walk reuses the
+    // same `CONTAINER_KINDS` enumeration as the flat parser
+    // (`walkNamespaceTree` -> `extractPublishersFromContainer`), so adding the
+    // two extension keys must surface their publishers under the BC 24+ schema
+    // too. In a real BC 28 Base Application these objects sit deep inside
+    // `Namespaces[]`, which is exactly the surface this test guards.
+    const json = {
+      Namespaces: [
+        {
+          Name: 'Extensions',
+          TableExtensions: [
+            {
+              Id: 50700,
+              Name: 'TblExt',
+              Methods: [{ Name: 'OnTableExt', Attributes: [{ Name: 'IntegrationEvent' }] }]
+            }
+          ],
+          PageExtensions: [
+            {
+              Id: 50800,
+              Name: 'PgExt',
+              Methods: [{ Name: 'OnPageExt', Attributes: [{ Name: 'BusinessEvent' }] }]
+            }
+          ]
+        }
+      ]
+    };
+    const publishers = parseNamespacesSymbols(json, APP_ID);
+    assert.strictEqual(publishers.length, 2);
+    const kinds = new Map(publishers.map((p) => [p.owner.kind, p.eventName]));
+    assert.strictEqual(kinds.get('tableextension'), 'OnTableExt');
+    assert.strictEqual(kinds.get('pageextension'), 'OnPageExt');
+  });
 });
 
 suite('symbols/schemaNamespaces: filtering and edge cases', () => {
