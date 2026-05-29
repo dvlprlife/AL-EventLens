@@ -4,6 +4,10 @@ All notable changes to the AL EventLens extension will be documented in this fil
 
 ## [Unreleased]
 
+### Changed
+
+- CodeLens now caches the workspace-wide subscriber-count map per store generation instead of rebuilding it on every `provideCodeLenses` call (`src/ui/codelens.ts`). VS Code calls `provideCodeLenses` per visible `al` editor on every edit, scroll, and config change; each call recomputed the full publisher-key → subscriber-count map — O(total subscribers), tens of thousands at BaseApp scale. The map is now computed lazily and invalidated in `fireChange()`, the single point every count-changing signal (full re-index, incremental save, setting toggle) already routes through — mirroring the existing `EventTreeDataProvider` cache. The per-document `parseAl` stays per-call.
+
 ### Fixed
 
 - Event publishers declared inside `tableextension` / `pageextension` objects in dependency `.app` packages were silently dropped from the index (`src/symbols/schemaFlat.ts`). `CONTAINER_KINDS` enumerated the base object kinds but omitted the `TableExtensions[]` / `PageExtensions[]` arrays that `SymbolReference.json` uses for extension objects, so every `[IntegrationEvent]` / `[BusinessEvent]` published from a compiled extension object was missing — even though the same publisher was indexed correctly from open workspace `.al` source. The two keys are now enumerated alongside the base kinds, and because the legacy flat parser and the BC 24+ nested `Namespaces[]` walk share this single enumeration, both schema surfaces are fixed. (Verified against a real BC 28 Microsoft Base Application `SymbolReference.json`: the array keys are exactly `TableExtensions` / `PageExtensions`, and 109 `[IntegrationEvent]` publishers live inside extension objects there.)
