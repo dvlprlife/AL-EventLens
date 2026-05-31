@@ -457,6 +457,61 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
     assert.strictEqual(result, undefined);
   });
 
+  test('valid JSON with a malformed array element returns undefined (does not throw)', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(
+      symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`
+    );
+    // Valid v5 wrapper (passes the top-level array check), but the
+    // publishers array contains a bare object and a null, and the
+    // subscribers array contains an entry missing `loc`. Pre-fix this
+    // threw a TypeError out of loadCachedSymbols (the subscriber path
+    // dropped the app; the publisher path aborted buildIndex later in
+    // resolveSubscribers).
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 5,
+        publishers: [{}, null],
+        subscribers: [
+          { owner: { kind: 'codeunit', name: 'Sub' },
+            target: { kind: 'codeunit', name: 'Sales-Post' },
+            targetEvent: 'OnAfterPostSalesDoc' /* loc intentionally missing */ }
+        ],
+        triggerOwners: []
+      }))
+    );
+
+    let result: unknown;
+    await assert.doesNotReject(async () => { result = await loadCachedSymbols(ctx, key); });
+    assert.strictEqual(result, undefined,
+      'a malformed array element must be a clean cache miss, not a throw');
+  });
+
+  test('valid JSON with a malformed triggerOwners element returns undefined', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(
+      symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`
+    );
+    // publishers/subscribers well-formed (empty), but a trigger owner is
+    // missing its `name` — locks the third array's per-element gate.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 5,
+        publishers: [],
+        subscribers: [],
+        triggerOwners: [{ kind: 'codeunit' }]
+      }))
+    );
+    const result = await loadCachedSymbols(ctx, key);
+    assert.strictEqual(result, undefined);
+  });
+
   test('location is stripped on serialize', async () => {
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
     const withLocation: Publisher = {

@@ -50,6 +50,42 @@ interface CachedPayloadV5 {
   readonly appPublisher?: string;
 }
 
+/** True when `v` is a non-null, non-array object. */
+function isObj(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/** Minimal ObjectRef shape: object with string `kind` and string `name`.
+ *  `id` / `appId` are optional and not load-bearing for the match keys,
+ *  so they are intentionally not checked. */
+function isObjectRefLike(v: unknown): boolean {
+  return isObj(v) && typeof v.kind === 'string' && typeof v.name === 'string';
+}
+
+/** A cached publisher must have an ObjectRef-like `owner`, a string
+ *  `eventName`, and a string `kind`. (`parameters` / `location` are not
+ *  dereferenced before the index is assembled, so they are not checked.) */
+function isCachedPublisherLike(v: unknown): boolean {
+  return isObj(v)
+    && isObjectRefLike(v.owner)
+    && typeof v.eventName === 'string'
+    && typeof v.kind === 'string';
+}
+
+/** A cached subscriber must have ObjectRef-like `owner` and `target`, a
+ *  string `targetEvent`, and a `loc` with a string `uri` plus integer
+ *  `line` / `char` (revived to a vscode.Location on load). */
+function isCachedSubscriberLike(v: unknown): boolean {
+  return isObj(v)
+    && isObjectRefLike(v.owner)
+    && isObjectRefLike(v.target)
+    && typeof v.targetEvent === 'string'
+    && isObj(v.loc)
+    && typeof v.loc.uri === 'string'
+    && Number.isInteger(v.loc.line)
+    && Number.isInteger(v.loc.char);
+}
+
 /**
  * Sanitize a path segment so it round-trips safely on every platform's
  * filesystem. `appId` and `version` come from a `.app` package's manifest
@@ -83,9 +119,9 @@ function isCacheEnabled(): boolean {
  * `extensionContext.globalStorageUri`.
  *
  * Returns `undefined` (never throws) for any of: caching disabled, file
- * missing, file unreadable, JSON malformed, payload shape unexpected, or
- * `schemaVersion` mismatch. The indexer treats `undefined` as a cache
- * miss and re-parses the package.
+ * missing, file unreadable, JSON malformed, payload shape unexpected
+ * (top-level or any array element), or `schemaVersion` mismatch. The
+ * indexer treats `undefined` as a cache miss and re-parses the package.
  */
 export async function loadCachedSymbols(
   context: vscode.ExtensionContext,
@@ -117,6 +153,16 @@ export async function loadCachedSymbols(
     return undefined;
   }
   const payload = parsed as CachedPayloadV5;
+  if (
+    !payload.publishers.every(isCachedPublisherLike) ||
+    !payload.subscribers.every(isCachedSubscriberLike) ||
+    !payload.triggerOwners.every(isObjectRefLike)
+  ) {
+    // A valid-JSON file with a malformed array element (hand-edit or
+    // non-truncating disk corruption). Treat as a cache miss so the
+    // indexer re-parses cleanly — honoring the "never throws" contract.
+    return undefined;
+  }
   // Cached publishers intentionally have no `vscode.Location` — see
   // storeCachedSymbols. Cached subscribers revive their flattened `loc`
   // back to a `vscode.Location`; `resolved` is recomputed globally by
