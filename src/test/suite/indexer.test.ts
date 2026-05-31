@@ -1705,11 +1705,9 @@ suite('index/indexer: buildIndex', () => {
     // `parser_1.parseAl(...)` call site goes through our throwing stub.
     // The override is restored after the test by capturing the original
     // and reinstalling it in this test's teardown.
-    /* eslint-disable @typescript-eslint/no-var-requires */
     const parserModule = require('../../al/parser') as {
       parseAl: (uri: vscode.Uri, text: string, appId?: string) => unknown;
     };
-    /* eslint-enable @typescript-eslint/no-var-requires */
     const originalParseAl = parserModule.parseAl;
     const SYNTHETIC_PARSER_BUG = new Error('synthetic: catastrophic regex backtracking');
     parserModule.parseAl = (): never => { throw SYNTHETIC_PARSER_BUG; };
