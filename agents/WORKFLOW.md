@@ -130,6 +130,12 @@ A human reviews the PR. On merge the issue is closed.
 
 ---
 
+## Non-agent PR streams
+
+[Dependabot](../.github/dependabot.yml) PRs (npm + GitHub Actions, weekly, grouped) are a **human-reviewed** stream that lives **outside** this label state machine. They carry only the `dependencies` label — never `agent` or any `status:*` label — so the planner / worker / reviewer agents never pick them up as pipeline work. They run through the same `build.yml` CI matrix as any other PR.
+
+---
+
 ## AL-specific notes
 
 These are the architectural ground rules the PR Reviewer should treat as load-bearing alongside `CLAUDE.md`. They are repeated here so the reviewer agent loads them automatically with `agents/WORKFLOW.md`.
