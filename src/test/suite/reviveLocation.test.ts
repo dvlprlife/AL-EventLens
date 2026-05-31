@@ -23,6 +23,20 @@ suite('util/reviveLocation: revivePosition', () => {
     assert.deepStrictEqual(revivePosition({ line: '5' as unknown, character: 12 }),
       { line: 0, character: 12 });
   });
+
+  test('negative line/character clamp to 0 (#133)', () => {
+    // vscode.Position/Range throw illegalArgument on a negative; clamp so
+    // gotoSubscriber falls back to (0,0) instead of surfacing an error toast.
+    assert.deepStrictEqual(revivePosition({ line: -1, character: 4 }), { line: 0, character: 4 });
+    assert.deepStrictEqual(revivePosition({ line: 4, character: -7 }), { line: 4, character: 0 });
+    assert.deepStrictEqual(revivePosition({ line: -1, character: -1 }), { line: 0, character: 0 });
+  });
+
+  test('non-integer line/character floor to a valid coordinate (#133)', () => {
+    assert.deepStrictEqual(revivePosition({ line: 2.9, character: 5.1 }), { line: 2, character: 5 });
+    // NaN is not >= 0, so it falls through to 0.
+    assert.deepStrictEqual(revivePosition({ line: NaN, character: 3 }), { line: 0, character: 3 });
+  });
 });
 
 suite('util/reviveLocation: reviveRange', () => {
@@ -82,5 +96,19 @@ suite('util/reviveLocation: reviveRange', () => {
     assert.strictEqual(reviveRange(undefined).start.line, 0);
     assert.strictEqual(reviveRange(null).start.line, 0);
     assert.strictEqual(reviveRange(42).start.line, 0);
+  });
+
+  test('negative coordinates produce a valid Range, not a throw (#133)', () => {
+    // Pre-clamp this threw illegalArgument out of the un-try/caught
+    // gotoSubscriber handler. A built vscode.Range proves no throw.
+    let r: vscode.Range | undefined;
+    assert.doesNotThrow(() => {
+      r = reviveRange({ start: { line: -3, character: -2 }, end: { line: -1, character: -1 } });
+    });
+    assert.ok(r);
+    assert.strictEqual(r!.start.line, 0);
+    assert.strictEqual(r!.start.character, 0);
+    assert.strictEqual(r!.end.line, 0);
+    assert.strictEqual(r!.end.character, 0);
   });
 });

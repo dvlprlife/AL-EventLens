@@ -836,8 +836,9 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
       };
       assert.strictEqual(last.type, 'reveal');
       assert.strictEqual(last.search, 'codeunit::MyCu');
-      // selectKey shape matches publisherKey() — case-insensitive triple.
-      assert.strictEqual(last.selectKey, 'codeunit mycu onafterfoo');
+      // selectKey shape matches publisherKey() — case-insensitive triple,
+      // U+0001-delimited (issue #133; previously a single space).
+      assert.strictEqual(last.selectKey, 'codeunit\x01mycu\x01onafterfoo');
       assert.strictEqual(getSelectedPublisher(), pub,
         'passing a selectPublisher must update the module-level selection cache');
     } finally {

@@ -38,6 +38,14 @@ export function reviveRange(input: unknown): vscode.Range {
  * Same defensive pattern for a single `vscode.Position`. Returns plain
  * `{line, character}` rather than a `vscode.Position` because the result
  * is passed straight into the `vscode.Range` constructor.
+ *
+ * Negative or non-integer coordinates are clamped/floored to a valid value:
+ * `vscode.Position`/`Range` throw `illegalArgument` on a negative or
+ * non-integer, and `gotoSubscriber` invokes `reviveRange` outside any
+ * try/catch, so a malformed structured-cloned payload would otherwise
+ * surface a generic error toast instead of this helper's `(0,0)` fallback.
+ * `Math.floor` also coerces non-integers; `>= 0` is `false` for `NaN`, so
+ * `NaN` falls through to 0.
  */
 export function revivePosition(input: unknown): { line: number; character: number } {
   if (typeof input !== 'object' || input === null) {
@@ -45,7 +53,7 @@ export function revivePosition(input: unknown): { line: number; character: numbe
   }
   const p = input as { line?: unknown; character?: unknown };
   return {
-    line: typeof p.line === 'number' ? p.line : 0,
-    character: typeof p.character === 'number' ? p.character : 0
+    line: typeof p.line === 'number' && p.line >= 0 ? Math.floor(p.line) : 0,
+    character: typeof p.character === 'number' && p.character >= 0 ? Math.floor(p.character) : 0
   };
 }

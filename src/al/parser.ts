@@ -206,16 +206,23 @@ function parseParameterListAt(text: string, fromIdx: number): ReadonlyArray<Para
     return [];
   }
   // Scan forward to the matching close paren, ignoring nested parens that
-  // can appear inside type expressions like `Dictionary of [Code[20], Text]`
-  // even though AL parameter lists rarely nest deeply. Strings inside AL
-  // identifiers are quoted with `"…"` and cannot contain literal parens, so
-  // a simple depth counter is sufficient.
+  // can appear inside type expressions like `Dictionary of [Code[20], Text]`.
+  // A quoted AL identifier (`"Weird (Name)"` as a parameter name or quoted
+  // Record subtype) can legally contain parens, so spans inside `"…"` are
+  // skipped — their structural characters are part of the name, not the
+  // list structure. (AL quoted identifiers have no embedded-quote escape, so
+  // a single toggle on `"` suffices.)
   let depth = 0;
+  let inQuote = false;
   const start = i + 1;
   let end = -1;
   for (let j = i; j < text.length; j++) {
     const ch = text[j];
-    if (ch === '(') {
+    if (ch === '"') {
+      inQuote = !inQuote;
+    } else if (inQuote) {
+      continue;
+    } else if (ch === '(') {
       depth++;
     } else if (ch === ')') {
       depth--;
@@ -240,16 +247,23 @@ function parseParameterListAt(text: string, fromIdx: number): ReadonlyArray<Para
 /**
  * Split a parameter list body by `;` at the **top level only** — `;` inside
  * brackets (e.g. `Dictionary of [Code[20]; Text]`) is part of a type
- * expression and must not be treated as a separator.
+ * expression and must not be treated as a separator. Spans inside a quoted
+ * identifier (`"Weird ; Name"`) are skipped too, so a `;`/`[`/`]`/`(`/`)`
+ * inside a quoted name or subtype is never mistaken for list structure.
  */
 function splitParameterList(inner: string): string[] {
   const parts: string[] = [];
   let depthBracket = 0;
   let depthParen = 0;
+  let inQuote = false;
   let last = 0;
   for (let i = 0; i < inner.length; i++) {
     const ch = inner[i];
-    if (ch === '[') {
+    if (ch === '"') {
+      inQuote = !inQuote;
+    } else if (inQuote) {
+      continue;
+    } else if (ch === '[') {
       depthBracket++;
     } else if (ch === ']') {
       depthBracket--;

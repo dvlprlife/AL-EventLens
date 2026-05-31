@@ -226,7 +226,11 @@ async function openNavxZip(
       );
     }
   }
-  const zipBytes = bytes.slice(NAVX_HEADER_SIZE);
+  // Zero-copy view past the 40-byte NAVX header. `JSZip.loadAsync` accepts a
+  // `Uint8Array` view (which a `subarray` is) on both desktop and web, so we
+  // avoid `slice`'s full copy of the package payload — a real peak-memory win
+  // on a large BaseApp. The length guard above keeps the view in bounds.
+  const zipBytes = bytes.subarray(NAVX_HEADER_SIZE);
   return JSZip.loadAsync(zipBytes);
 }
 

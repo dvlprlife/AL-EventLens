@@ -59,6 +59,22 @@ suite('index/match: publisherKey + subscriberKey', () => {
     const s = makeSubscriber('table', 'Customer', 'OnAfterInsertEvent');
     assert.notStrictEqual(publisherKey(p), subscriberKey(s));
   });
+
+  test('space-containing name/event do not collide across the delimiter (#133)', () => {
+    // Under the old single-space delimiter both produced "codeunit a b c";
+    // the U+0001 delimiter keeps them distinct.
+    const p = makePublisher('codeunit', 'A B', 'C');
+    const s = makeSubscriber('codeunit', 'A', 'B C');
+    assert.notStrictEqual(publisherKey(p), subscriberKey(s),
+      'a name ending in a space-token must not collide with an event starting with one');
+  });
+
+  test('genuinely matching space-containing names still produce the same key (#133)', () => {
+    const p = makePublisher('codeunit', 'My Cool Codeunit', 'On After Foo');
+    const s = makeSubscriber('codeunit', 'my cool codeunit', 'on after foo');
+    assert.strictEqual(publisherKey(p), subscriberKey(s),
+      'the delimiter change must not break legitimate matches on names/events with spaces');
+  });
 });
 
 suite('index/match: findSubscribersFor', () => {

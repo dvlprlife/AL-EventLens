@@ -252,6 +252,13 @@ export async function buildIndex(
     // Drop any `.app` that is the compiled twin of an open workspace project
     // BEFORE version selection, so the skip holds for both
     // `includeAllAppVersions` values and suppresses every version of the app.
+    // An excluded twin may leave a still-valid-schema cache entry behind in
+    // the shared `globalStorageUri/symbols/` dir — that is intentional:
+    // `pruneOrphanCacheEntries` deliberately sweeps only schema-mismatched
+    // files (the storage is shared across every workspace ever indexed, so a
+    // "not visited this run → delete" rule would evict other workspaces'
+    // entries). The lingering entry is never read (the appId is excluded
+    // from Pass 2) and is reclaimed on the next schema bump (issue #133 D6).
     const candidateAppUris = workspaceAppIds.size === 0
       ? allAppUris
       : excludeWorkspaceApps(allAppUris, workspaceAppIds, metaByUri);
