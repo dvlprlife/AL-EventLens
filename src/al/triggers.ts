@@ -82,8 +82,11 @@ const tablePageHeaderRe =
 /**
  * Walk a single AL source file's text and emit one `ObjectRef` per Table or
  * Page header into the supplied dedup map. The map's keys are scoped by
- * `appId` so identically-named objects in different packages aren't
- * collapsed, and case-insensitive on name to match the resolver. Pass the
+ * `appId` (case-insensitive — GUID casing differs between `app.json` `id`
+ * and `NavxManifest.xml` `Id`) so identically-named objects in different
+ * packages aren't collapsed, and case-insensitive on name to match the
+ * resolver. Only the dedup key is normalized; the emitted `ObjectRef`
+ * keeps its source-cased `appId` for display/grouping. Pass the
  * same map across many files in a pass to dedupe globally; pass a fresh
  * empty map per file for incremental save handling.
  *
@@ -105,7 +108,7 @@ export function collectTriggerOwners(
     if (!name) {
       continue;
     }
-    const key = `${appId ?? '__workspace__'}|${kind}|${name.toLowerCase()}`;
+    const key = `${appId?.toLowerCase() ?? '__workspace__'}|${kind}|${name.toLowerCase()}`;
     if (out.has(key)) {
       continue;
     }

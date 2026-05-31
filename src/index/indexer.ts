@@ -77,11 +77,14 @@ interface AppResult {
   readonly triggerOwners: ObjectRef[];
 }
 
-/** Reproduces `collectTriggerOwners`' dedup key (`appId|kind|name`, name
- *  lower-cased) so trigger owners merged from a cache hit key identically
- *  to those collected fresh from bundled source. */
+/** Reproduces `collectTriggerOwners`' dedup key (`appId|kind|name`, both
+ *  `appId` and `name` lower-cased) so trigger owners merged from a cache hit
+ *  key identically to those collected fresh from bundled source. GUID casing
+ *  varies between `app.json` `id` and `NavxManifest.xml` `Id`, so the appId
+ *  scope must be case-insensitive — matching the twin-exclusion
+ *  normalization (`workspaceAppIds`) used elsewhere. */
 function triggerOwnerKey(owner: ObjectRef): string {
-  return `${owner.appId ?? '__workspace__'}|${owner.kind}|${owner.name.toLowerCase()}`;
+  return `${owner.appId?.toLowerCase() ?? '__workspace__'}|${owner.kind}|${owner.name.toLowerCase()}`;
 }
 
 /**

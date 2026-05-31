@@ -1,7 +1,7 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { ObjectKind, ObjectRef } from '../../al/types';
-import { synthesizeTriggerPublishers } from '../../al/triggers';
+import { collectTriggerOwners, synthesizeTriggerPublishers } from '../../al/triggers';
 
 const EXPECTED_TABLE_EVENTS: ReadonlyArray<string> = [
   'OnBeforeInsertEvent',
@@ -128,4 +128,31 @@ suite('al/triggers: kinds without triggers', () => {
       assert.deepStrictEqual(synthesizeTriggerPublishers(owner), []);
     });
   }
+});
+
+suite('al/triggers: collectTriggerOwners appId case-insensitivity (#130)', () => {
+  const tableSrc = 'table 50300 "My Table"\n{\n}\n';
+
+  test('same (kind, name) under appIds differing only in GUID case collapses to one owner', () => {
+    const out = new Map<string, ObjectRef>();
+    // GUID casing differs between app.json `id` and NavxManifest.xml `Id`;
+    // the dedup key lower-cases appId so the two collate identically.
+    collectTriggerOwners(tableSrc, out, 'AAAAAAAA-1111-2222-3333-444444444444');
+    collectTriggerOwners(tableSrc, out, 'aaaaaaaa-1111-2222-3333-444444444444');
+    assert.strictEqual(out.size, 1,
+      'a case-only appId difference must not duplicate the trigger owner');
+    // The emitted ObjectRef keeps its source-cased appId (first one wins);
+    // only the dedup key is normalized.
+    const owner = [...out.values()][0];
+    assert.strictEqual(owner.appId, 'AAAAAAAA-1111-2222-3333-444444444444',
+      'the surviving owner keeps its source-cased appId, not the lower-cased key');
+  });
+
+  test('genuinely distinct appIds still produce distinct owners', () => {
+    const out = new Map<string, ObjectRef>();
+    collectTriggerOwners(tableSrc, out, '11111111-1111-1111-1111-111111111111');
+    collectTriggerOwners(tableSrc, out, '22222222-2222-2222-2222-222222222222');
+    assert.strictEqual(out.size, 2,
+      'different appIds must remain separate owners (scoping preserved)');
+  });
 });

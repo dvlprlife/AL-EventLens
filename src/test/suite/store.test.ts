@@ -209,6 +209,91 @@ suite('index/store: EventIndexStore', () => {
     }
   });
 
+  test('updateFile: a workspace Table save supersedes the bundled .app twin trigger set (#130)', () => {
+    const store = new EventIndexStore();
+    try {
+      const fileA = vscode.Uri.parse('file:///workspace/MyTable.al');
+      const APP = '11111111-1111-1111-1111-111111111111';
+
+      // Seed with the .app-bundled trigger set for MyTable (both location and
+      // sourceUri undefined — the bundled shape), plus an unrelated bundled
+      // table's trigger that must survive the save.
+      store.set({
+        publishers: [
+          makePublisher('table', 'MyTable', 'OnAfterInsertEvent', { kind: 'trigger', appId: APP }),
+          makePublisher('table', 'MyTable', 'OnAfterDeleteEvent', { kind: 'trigger', appId: APP }),
+          makePublisher('table', 'OtherTable', 'OnAfterInsertEvent', { kind: 'trigger', appId: APP })
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      // Save the workspace copy of MyTable: re-synthesized triggers carry
+      // sourceUri = fileA and the same appId.
+      store.updateFile(fileA, [
+        makePublisher('table', 'MyTable', 'OnAfterInsertEvent', { kind: 'trigger', sourceUri: fileA, appId: APP }),
+        makePublisher('table', 'MyTable', 'OnAfterModifyEvent', { kind: 'trigger', sourceUri: fileA, appId: APP })
+      ], []);
+
+      const idx = store.get();
+      const triggerEvents = idx.publishers
+        .filter((p) => p.kind === 'trigger')
+        .map((p) => `${p.owner.name}.${p.eventName}`)
+        .sort();
+      // The bundled MyTable set (Insert/Delete) is superseded by the workspace
+      // set (Insert/Modify); OtherTable's bundled trigger is untouched.
+      assert.deepStrictEqual(triggerEvents,
+        ['MyTable.OnAfterInsertEvent', 'MyTable.OnAfterModifyEvent', 'OtherTable.OnAfterInsertEvent'],
+        'bundled MyTable triggers superseded by the workspace save; unrelated bundled table preserved');
+      // No leftover bundled (location + sourceUri both undefined) MyTable trigger.
+      const leftoverBundled = idx.publishers.filter(
+        (p) => p.kind === 'trigger' && p.owner.name === 'MyTable'
+          && p.location === undefined && p.sourceUri === undefined
+      );
+      assert.strictEqual(leftoverBundled.length, 0,
+        'no bundled MyTable trigger may survive the supersede');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('updateFile: supersede holds when bundled vs workspace appId differ only in GUID case (#130)', () => {
+    const store = new EventIndexStore();
+    try {
+      const fileA = vscode.Uri.parse('file:///workspace/MyTable.al');
+      const APP_UPPER = 'AAAAAAAA-1111-2222-3333-444444444444';
+      const APP_LOWER = 'aaaaaaaa-1111-2222-3333-444444444444';
+
+      // Bundled twin tagged with the UPPER-cased GUID (NavxManifest.xml `Id`).
+      store.set({
+        publishers: [
+          makePublisher('table', 'MyTable', 'OnAfterInsertEvent', { kind: 'trigger', appId: APP_UPPER }),
+          makePublisher('table', 'MyTable', 'OnAfterDeleteEvent', { kind: 'trigger', appId: APP_UPPER })
+        ],
+        subscribers: [],
+        appMeta: new Map()
+      });
+
+      // Workspace save tagged with the lower-cased GUID (app.json `id`).
+      store.updateFile(fileA, [
+        makePublisher('table', 'MyTable', 'OnAfterInsertEvent', { kind: 'trigger', sourceUri: fileA, appId: APP_LOWER })
+      ], []);
+
+      const idx = store.get();
+      const myTableTriggers = idx.publishers.filter(
+        (p) => p.kind === 'trigger' && p.owner.name === 'MyTable'
+      );
+      // The case-only appId difference must still supersede (ownerKey
+      // lower-cases appId), leaving exactly the one workspace trigger.
+      assert.strictEqual(myTableTriggers.length, 1,
+        `case-only appId difference must still supersede; got ${myTableTriggers.length}`);
+      assert.strictEqual(myTableTriggers[0].sourceUri?.toString(), fileA.toString(),
+        'the surviving trigger must be the workspace one (sourceUri = saved file)');
+    } finally {
+      store.dispose();
+    }
+  });
+
   test('updateFile re-runs resolveSubscribers: a subscriber resolves when its publisher is added', () => {
     const store = new EventIndexStore();
     try {

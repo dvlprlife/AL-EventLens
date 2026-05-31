@@ -69,6 +69,13 @@ export class EventIndexStore implements vscode.Disposable {
    * supplied lists, then re-run `resolveSubscribers` so cross-file links
    * stay correct. Trigger publishers are matched on `sourceUri` (they
    * carry no `location`); everything else is matched on `location.uri`.
+   *
+   * Also reapplies the workspace-supersedes-package rule on this incremental
+   * path (mirroring `buildIndex`): a `.app`-bundled trigger publisher carries
+   * neither `location` nor `sourceUri`, so it would otherwise survive the URI
+   * filter and duplicate the freshly-synthesized workspace triggers for the
+   * same Table/Page owner. Any incoming workspace trigger owner therefore
+   * evicts the matching bundled twin (issue #130).
    */
   public updateFile(
     uri: vscode.Uri,
@@ -77,9 +84,33 @@ export class EventIndexStore implements vscode.Disposable {
   ): void {
     const uriKey = uri.toString();
 
+    // Owner key in the same `(appId, kind, name)` lower-cased format as
+    // `triggerOwnerKey` / `collectTriggerOwners`, so the supersede rule
+    // collates identically to the full-index pass.
+    const ownerKey = (p: Publisher): string =>
+      `${p.owner.appId?.toLowerCase() ?? '__workspace__'}|${p.owner.kind}|${p.owner.name.toLowerCase()}`;
+    const incomingTriggerOwners = new Set(
+      publishers.filter((p) => p.kind === 'trigger').map(ownerKey)
+    );
+
     const survivingPublishers = this.current.publishers.filter((p) => {
       const key = p.location?.uri.toString() ?? p.sourceUri?.toString();
-      return key !== uriKey;
+      if (key === uriKey) {
+        return false; // evict prior records attributed to the saved file
+      }
+      // A workspace save that re-synthesizes a Table/Page's triggers
+      // supersedes the bundled `.app` twin's set for the same owner. The
+      // `location`/`sourceUri`-both-undefined guard scopes this to bundled
+      // triggers only, leaving workspace-tagged triggers to the URI branch.
+      if (
+        p.kind === 'trigger' &&
+        p.location === undefined &&
+        p.sourceUri === undefined &&
+        incomingTriggerOwners.has(ownerKey(p))
+      ) {
+        return false;
+      }
+      return true;
     });
     const survivingSubscribers = this.current.subscribers.filter(
       (s) => s.location.uri.toString() !== uriKey
