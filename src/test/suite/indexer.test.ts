@@ -970,6 +970,59 @@ suite('index/indexer: buildIndex', () => {
     assert.ok(dupWarn, `expected a "duplicate .app for appId" warning, got: ${JSON.stringify(warnCalls)}`);
   });
 
+  test('includeAllAppVersions: same (appId, Version) twin collapses to one; distinct version survives (#129)', async () => {
+    // Two physically-distinct copies of the SAME (appId, Version) staged in
+    // different projects' .alpackages (a multi-root workspace), plus a
+    // genuinely distinct version. Pre-fix, includeAllAppVersions bypassed
+    // selectHighestVersionPerAppId, so both same-version copies entered the
+    // Pass-2 pool and raced storeCachedSymbols' cleanup sweep, evicting each
+    // other's freshly-written cache file. The indexer now dedups the twin
+    // before the pool while keeping every distinct version.
+    const APP_ID = '66666666-6666-6666-6666-666666666666';
+    // toString() order keeps copyA over copyB (projA < projB); the distinct
+    // version carries a different key and survives regardless of its order.
+    const distinctUri = vscode.Uri.parse('file:///workspace/.alpackages/Same_2.0.0.0.app');
+    const copyAUri = vscode.Uri.parse('file:///workspace/projA/.alpackages/Same_1.0.0.0.app');
+    const copyBUri = vscode.Uri.parse('file:///workspace/projB/.alpackages/Same_1.0.0.0.app');
+    const distinctBytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '2.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnV2')
+    });
+    const copyABytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnTwinA')
+    });
+    const copyBBytes = await buildAppBytes({
+      manifestXml: buildAppManifest(APP_ID, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(APP_ID, 'OnTwinB')
+    });
+    applyPatches({
+      alFiles: [],
+      appFiles: [distinctUri, copyAUri, copyBUri],
+      fs: { bytes: new Map([
+        [distinctUri.toString(), distinctBytes],
+        [copyAUri.toString(), copyABytes],
+        [copyBUri.toString(), copyBBytes]
+      ]) },
+      includeTriggerEvents: false,
+      includeAllAppVersions: true
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    const events = idx.publishers
+      .filter((p) => p.owner.appId === APP_ID).map((p) => p.eventName).sort();
+    // Same-version twin collapsed to the deterministic winner (copyA, sorted
+    // first); the distinct version is still surfaced, so includeAllAppVersions
+    // semantics are intact. Pre-fix this also held OnTwinB (the raced twin).
+    assert.deepStrictEqual(events, ['OnTwinA', 'OnV2'],
+      `same-version twin must collapse to copyA and the distinct version must survive; got ${JSON.stringify(events)}`);
+    const dupWarn = warnCalls.find((m) =>
+      m.includes('duplicate .app for appId') && m.includes('1.0.0.0'));
+    assert.ok(dupWarn,
+      `expected a duplicate-.app warning for the collapsed 1.0.0.0 twin; got: ${JSON.stringify(warnCalls)}`);
+  });
+
   // ─── #79: workspace ⇄ .alpackages double-counting ──────────────────────
 
   test('workspace app wins: app present as both .al source and .app is indexed once', async () => {

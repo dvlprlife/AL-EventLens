@@ -221,6 +221,11 @@ export async function loadCachedSymbols(
  * Cleanup is intentionally keyed on `(appId, version)`, not appId alone,
  * so concurrent writes for different versions of the same app (the
  * `includeAllAppVersions=true` case) don't evict each other's entries.
+ * Two writers sharing the *same* `(appId, version)` would still race this
+ * sweep (each deleting the other's just-written mtime file), but the
+ * indexer now dedups physically-identical same-`(appId, version)` copies
+ * (`dedupByAppIdVersion`) before they reach the write pool, so only one
+ * canonical copy is ever written for a given version (issue #129).
  */
 export async function storeCachedSymbols(
   context: vscode.ExtensionContext,
