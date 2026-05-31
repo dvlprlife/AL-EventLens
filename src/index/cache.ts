@@ -73,8 +73,12 @@ function isCachedPublisherLike(v: unknown): boolean {
 }
 
 /** A cached subscriber must have ObjectRef-like `owner` and `target`, a
- *  string `targetEvent`, and a `loc` with a string `uri` plus integer
- *  `line` / `char` (revived to a vscode.Location on load). */
+ *  string `targetEvent`, and a `loc` with a string `uri` plus non-negative
+ *  integer `line` / `char` (revived to a vscode.Location on load). The
+ *  `>= 0` bound matters: `new vscode.Position(line, char)` throws
+ *  `illegalArgument` on a negative coordinate, and `Number.isInteger(-1)`
+ *  is `true`, so without it a negative value would slip the gate and throw
+ *  out of `loadCachedSymbols` — breaking the never-throws contract. */
 function isCachedSubscriberLike(v: unknown): boolean {
   return isObj(v)
     && isObjectRefLike(v.owner)
@@ -82,8 +86,8 @@ function isCachedSubscriberLike(v: unknown): boolean {
     && typeof v.targetEvent === 'string'
     && isObj(v.loc)
     && typeof v.loc.uri === 'string'
-    && Number.isInteger(v.loc.line)
-    && Number.isInteger(v.loc.char);
+    && Number.isInteger(v.loc.line) && (v.loc.line as number) >= 0
+    && Number.isInteger(v.loc.char) && (v.loc.char as number) >= 0;
 }
 
 /**

@@ -490,6 +490,38 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
       'a malformed array element must be a clean cache miss, not a throw');
   });
 
+  test('subscriber loc with a negative coordinate returns undefined (does not throw)', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(
+      symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`
+    );
+    // `Number.isInteger(-1)` is `true`, so a negative line/char passes the
+    // integer gate, but `new vscode.Position(-1, 0)` throws illegalArgument
+    // on revival. The validator's `>= 0` bound must reject it as a clean
+    // cache miss rather than let it throw out of loadCachedSymbols.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 5,
+        publishers: [],
+        subscribers: [
+          { owner: { kind: 'codeunit', name: 'Sub' },
+            target: { kind: 'codeunit', name: 'T' },
+            targetEvent: 'E',
+            loc: { uri: 'file:///x', line: -1, char: 0 } }
+        ],
+        triggerOwners: []
+      }))
+    );
+
+    let result: unknown;
+    await assert.doesNotReject(async () => { result = await loadCachedSymbols(ctx, key); });
+    assert.strictEqual(result, undefined,
+      'a negative loc coordinate must be a clean cache miss, not a throw');
+  });
+
   test('valid JSON with a malformed triggerOwners element returns undefined', async () => {
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
     const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
