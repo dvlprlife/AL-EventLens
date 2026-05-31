@@ -241,21 +241,27 @@ export async function buildIndex(
   if (scanAlpackages) {
     const allAppUris = await vscode.workspace.findFiles('**/.alpackages/*.app');
     // Read each package's NavxManifest.xml once (cheap path — no
-    // SymbolReference decompression). Both steps below consult this single
-    // map, so no `.app` is metadata-read twice. Skip the reads entirely when
-    // neither step needs them: no workspace twins to exclude AND every
-    // version is being kept.
-    const metaByUri = workspaceAppIds.size > 0 || !includeAllAppVersions
-      ? await readAppMetadataMap(allAppUris)
-      : new Map<string, AppMetadata>();
+    // SymbolReference decompression). Every step below consults this single
+    // map — workspace-twin exclusion, version selection, and the
+    // same-`(appId, version)` dedup that both selection paths now perform —
+    // so the map is always built and no `.app` is metadata-read twice.
+    const metaByUri = await readAppMetadataMap(allAppUris);
     // Drop any `.app` that is the compiled twin of an open workspace project
     // BEFORE version selection, so the skip holds for both
     // `includeAllAppVersions` values and suppresses every version of the app.
     const candidateAppUris = workspaceAppIds.size === 0
       ? allAppUris
       : excludeWorkspaceApps(allAppUris, workspaceAppIds, metaByUri);
+    // Even under `includeAllAppVersions`, collapse byte-for-byte-redundant
+    // copies of the same `(appId, version)` (e.g. the same dependency staged
+    // in two projects' `.alpackages` across a multi-root workspace) so two
+    // identical packages never both enter the read/write pool and race the
+    // per-write cache-cleanup sweep in `storeCachedSymbols`, evicting each
+    // other's freshly-written file (issue #129). Genuinely distinct versions
+    // carry a different key and all survive — `includeAllAppVersions`
+    // semantics are unchanged.
     const appUris = includeAllAppVersions
-      ? candidateAppUris
+      ? dedupByAppIdVersion(candidateAppUris, metaByUri)
       : selectHighestVersionPerAppId(candidateAppUris, metaByUri);
     progress?.report({
       message: `Scanning .alpackages (${appUris.length} package${appUris.length === 1 ? '' : 's'})`
@@ -270,9 +276,10 @@ export async function buildIndex(
         // Prefer the manifest metadata already read by `readAppMetadataMap`
         // above — `readAppMetadata` re-opens the NAVX zip per call, so on
         // a cold start over many packages reusing the map halves the
-        // per-package work on a cache hit. The fall-through covers the
-        // `!workspaceAppIds.size && includeAllAppVersions` branch where
-        // `metaByUri` is intentionally empty (no map was built at all).
+        // per-package work on a cache hit. The map is now always built, so
+        // the fall-through only covers a single URI whose manifest read
+        // failed during the map pass (such a URI is kept by the selection
+        // helpers so this loop's try/catch can surface the failure).
         const meta = metaByUri.get(uri.toString()) ?? await readAppMetadata(uri);
         const key: CacheKey = { appId: meta.appId, version: meta.version, mtime: stat.mtime };
         const cached = await loadCachedSymbols(context, key);
@@ -515,4 +522,56 @@ function selectHighestVersionPerAppId(
     // cmp < 0: existing already higher, keep it.
   }
   return [...winners.values()].map((v) => v.uri);
+}
+
+/**
+ * Collapse `.app` URIs that are byte-for-byte-redundant copies of the same
+ * `(appId, version)` — e.g. the same dependency staged in two projects'
+ * `.alpackages` across a multi-root workspace, differing only by file
+ * `mtime`. Keeps the first URI per `(appId, version)` in deterministic
+ * sorted order and drops the rest, `console.warn`ing each collapsed copy.
+ *
+ * Used on the `includeAllAppVersions = true` path, where
+ * `selectHighestVersionPerAppId` is bypassed. Genuinely distinct versions
+ * carry a different `orphanCacheKey`, so they all survive and
+ * `includeAllAppVersions` still surfaces every version; only same-version
+ * twins — which can never coexist in the cache anyway and would race the
+ * per-write cleanup sweep in `storeCachedSymbols`, evicting each other's
+ * freshly-written files (issue #129) — are removed before the read/write
+ * pool.
+ *
+ * Pure over the pre-read `metaByUri` map (see `readAppMetadataMap`) — no
+ * I/O. A URI absent from `metaByUri` (its metadata read failed) is **kept**
+ * — matching `excludeWorkspaceApps` — so the main `readApp` loop's try/catch
+ * still reports it. Two no-metadata URIs cannot form a key and are both
+ * kept; that is safe, since a failed read writes no cache file.
+ */
+function dedupByAppIdVersion(
+  uris: ReadonlyArray<vscode.Uri>,
+  metaByUri: ReadonlyMap<string, AppMetadata>
+): vscode.Uri[] {
+  const seen = new Map<string, vscode.Uri>();
+  const kept: vscode.Uri[] = [];
+  // Deterministic order so the kept copy is stable across runs.
+  const sortedUris = [...uris].sort((a, b) => a.toString().localeCompare(b.toString()));
+  for (const uri of sortedUris) {
+    const meta = metaByUri.get(uri.toString());
+    if (!meta) {
+      // Metadata unread — keep so the `readApp` loop surfaces the failure.
+      kept.push(uri);
+      continue;
+    }
+    const key = orphanCacheKey(meta.appId, meta.version);
+    const existing = seen.get(key);
+    if (existing) {
+      console.warn(
+        `AL EventLens: duplicate .app for appId=${meta.appId} version=${meta.version} ` +
+        `(keeping ${existing.fsPath}, skipping ${uri.fsPath})`
+      );
+      continue;
+    }
+    seen.set(key, uri);
+    kept.push(uri);
+  }
+  return kept;
 }
