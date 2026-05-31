@@ -457,6 +457,126 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
     assert.strictEqual(result, undefined);
   });
 
+  test('valid JSON with a malformed array element returns undefined (does not throw)', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(
+      symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`
+    );
+    // Valid v5 wrapper (passes the top-level array check), but the
+    // publishers array contains a bare object and a null, and the
+    // subscribers array contains an entry missing `loc`. Pre-fix this
+    // threw a TypeError out of loadCachedSymbols (the subscriber path
+    // dropped the app; the publisher path aborted buildIndex later in
+    // resolveSubscribers).
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 5,
+        publishers: [{}, null],
+        subscribers: [
+          { owner: { kind: 'codeunit', name: 'Sub' },
+            target: { kind: 'codeunit', name: 'Sales-Post' },
+            targetEvent: 'OnAfterPostSalesDoc' /* loc intentionally missing */ }
+        ],
+        triggerOwners: []
+      }))
+    );
+
+    let result: unknown;
+    await assert.doesNotReject(async () => { result = await loadCachedSymbols(ctx, key); });
+    assert.strictEqual(result, undefined,
+      'a malformed array element must be a clean cache miss, not a throw');
+  });
+
+  test('subscriber loc with a negative coordinate returns undefined (does not throw)', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(
+      symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`
+    );
+    // `Number.isInteger(-1)` is `true`, so a negative line/char passes the
+    // integer gate, but `new vscode.Position(-1, 0)` throws illegalArgument
+    // on revival. The validator's `>= 0` bound must reject it as a clean
+    // cache miss rather than let it throw out of loadCachedSymbols.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 5,
+        publishers: [],
+        subscribers: [
+          { owner: { kind: 'codeunit', name: 'Sub' },
+            target: { kind: 'codeunit', name: 'T' },
+            targetEvent: 'E',
+            loc: { uri: 'file:///x', line: -1, char: 0 } }
+        ],
+        triggerOwners: []
+      }))
+    );
+
+    let result: unknown;
+    await assert.doesNotReject(async () => { result = await loadCachedSymbols(ctx, key); });
+    assert.strictEqual(result, undefined,
+      'a negative loc coordinate must be a clean cache miss, not a throw');
+  });
+
+  test('subscriber loc.uri with an illegal scheme returns undefined (does not throw)', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(
+      symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`
+    );
+    // `vscode.Uri.parse('a b:c')` throws [UriError] "Scheme contains
+    // illegal characters" even at the default strict=false — the scheme
+    // charset check is not gated by strict. `loc.uri` passes the
+    // `typeof === 'string'` gate, so the revival map is where it would
+    // throw. The try/catch around revival must turn it into a cache miss.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 5,
+        publishers: [],
+        subscribers: [
+          { owner: { kind: 'codeunit', name: 'Sub' },
+            target: { kind: 'codeunit', name: 'T' },
+            targetEvent: 'E',
+            loc: { uri: 'a b:c', line: 0, char: 0 } }
+        ],
+        triggerOwners: []
+      }))
+    );
+
+    let result: unknown;
+    await assert.doesNotReject(async () => { result = await loadCachedSymbols(ctx, key); });
+    assert.strictEqual(result, undefined,
+      'an unparseable loc.uri must be a clean cache miss, not a throw');
+  });
+
+  test('valid JSON with a malformed triggerOwners element returns undefined', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(
+      symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`
+    );
+    // publishers/subscribers well-formed (empty), but a trigger owner is
+    // missing its `name` — locks the third array's per-element gate.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 5,
+        publishers: [],
+        subscribers: [],
+        triggerOwners: [{ kind: 'codeunit' }]
+      }))
+    );
+    const result = await loadCachedSymbols(ctx, key);
+    assert.strictEqual(result, undefined);
+  });
+
   test('location is stripped on serialize', async () => {
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
     const withLocation: Publisher = {
