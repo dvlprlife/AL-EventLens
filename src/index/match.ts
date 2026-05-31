@@ -6,12 +6,18 @@ import type { ObjectKind, Publisher, Subscriber } from '../al/types';
  *
  * Used by `resolveSubscribers`, the CodeLens count, the export-Mermaid
  * handler, and anywhere else that needs publisher ↔ subscriber correlation.
- * The webview keeps its own JS-encoded copy because it runs in the iframe
+ * The delimiter is U+0001 (Start-of-Heading) — a C0 control character that
+ * cannot legally appear in an AL identifier or quoted event name, so a name
+ * or event containing spaces (`"A B"`) can never make two distinct keys
+ * collide (a plain space did: `(name="A B", event="C")` vs
+ * `(name="A", event="B C")` shared one key).
+ * The webview keeps its own JS-encoded copies because it runs in the iframe
  * sandbox and cannot import TS modules; if the matching rule ever changes,
- * `src/ui/panelHtml.ts:findSubscribersFor` must move in lockstep.
+ * `keyOf` (`src/ui/panelHtml.ts`) and the inline target key in
+ * `rebuildSubscribersIndex` must move in lockstep, keeping the same delimiter.
  */
 function matchKey(kind: ObjectKind, name: string, event: string): string {
-  return `${kind} ${name.toLowerCase()} ${event.toLowerCase()}`;
+  return `${kind}\x01${name.toLowerCase()}\x01${event.toLowerCase()}`;
 }
 
 /** Key derived from a publisher's (owner.kind, owner.name, eventName). */

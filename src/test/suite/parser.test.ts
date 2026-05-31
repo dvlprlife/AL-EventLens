@@ -198,6 +198,26 @@ suite('al/parser: publisher parameters', () => {
       { name: 'Id', typeText: 'Integer', isVar: false }
     ]);
   });
+
+  test('quoted name/type containing ; ( ) does not truncate or mis-split the list (#133)', () => {
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnFoo(var Rec: Record "Weird ; Name"; "Quoted (Param)": Integer)',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    // The `;` inside "Weird ; Name" must not split the list, and the `(`/`)`
+    // inside "Quoted (Param)" must not close the parameter list early.
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'Rec', typeText: 'Record "Weird ; Name"', isVar: true },
+      { name: 'Quoted (Param)', typeText: 'Integer', isVar: false }
+    ]);
+  });
 });
 
 suite('al/parser: subscribers', () => {
