@@ -1,0 +1,56 @@
+name: CodeQL
+
+# Static security analysis for the extension's TypeScript/JavaScript source.
+# The extension parses untrusted input (.app PKZIP packages decompressed
+# in-process, and arbitrary workspace .al source via regex), so the extended
+# security queries (zip handling, deserialization, ReDoS-adjacent regex, path
+# construction) are a worthwhile backstop. Separate from build.yml — this is
+# purely additive and runs on a single Linux runner (analysis is OS-independent).
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  schedule:
+    # Weekly, Monday ~05:23 UTC — off-peak, non-zero minute to dodge the
+    # top-of-hour scheduler spike; re-scans even on quiet weeks so newly
+    # published CodeQL queries surface latent issues.
+    - cron: '23 5 * * 1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze (javascript-typescript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          # Single CodeQL language covering both JS and TS — do NOT split.
+          languages: javascript-typescript
+          queries: security-extended
+      # Explicit build for determinism (the toolchain is known). CodeQL's
+      # JS/TS extractor analyzes source, so this mainly guarantees
+      # node_modules resolves cleanly; autobuild@v3 is the documented
+      # fallback if this ever proves fragile. `npm test` is intentionally
+      # skipped (needs xvfb, adds no analysis value).
+      - run: npm ci
+      - run: node esbuild.js --production
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:javascript-typescript"
