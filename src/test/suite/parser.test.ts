@@ -474,3 +474,90 @@ suite('al/parser: mixed and edge cases', () => {
     assert.strictEqual(publishers[0].eventName, 'OnX');
   });
 });
+
+suite('al/parser: procedure-search window (#125)', () => {
+  // The keyword search in findProcedureAfter is bounded to
+  // PROCEDURE_SEARCH_WINDOW (2048) chars past the attribute. These tests
+  // pin that the bound never affects valid AL (where `procedure` follows the
+  // attribute closely and signatures parse in full) while a procedure-less
+  // tail no longer drives an O(N x tail) scan.
+
+  test('procedure a few hundred chars below the attribute still resolves within the window', () => {
+    // A realistic gap (doc comments / blank lines) between the event
+    // attribute and `procedure`. Comments are stripped to blanks but still
+    // consume window distance; 20 lines is well under 2048 chars.
+    const gap = Array.from({ length: 20 }, (_, i) => `    // doc line ${i}`);
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      ...gap,
+      '    procedure OnAfterFoo()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnAfterFoo');
+  });
+
+  test('long parameter list extending past the window still parses in full', () => {
+    // `procedure` is found immediately (within the window), but the closing
+    // paren sits ~3.5 KB past the attribute — beyond PROCEDURE_SEARCH_WINDOW.
+    // parseParameterListAt scans the full text, so all params must parse,
+    // proving the window bounds only the keyword search, not the signature.
+    const count = 80;
+    const params = Array.from({ length: count }, (_, i) =>
+      `        var Param${i}: Record "Sales Header"` + (i < count - 1 ? ';' : ''));
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterPostManyArgs(',
+      ...params,
+      '    )',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnAfterPostManyArgs');
+    assert.strictEqual(publishers[0].parameters!.length, count);
+    assert.strictEqual(publishers[0].parameters![count - 1].name, `Param${count - 1}`);
+  });
+
+  test('many procedure-less attribute markers + large tail parse fast and bind nothing', () => {
+    // Pre-fix every one of the N orphan attributes scanned the whole tail
+    // for `procedure`, an O(N x tail) blow-up (~7.5 s at 40k markers per
+    // issue #125) — and each orphan bound to the single trailing procedure,
+    // producing N+1 publishers. The procedure-less tail (> 2048 chars) keeps
+    // even the last orphan's window from reaching the real procedure, so the
+    // bounded scan yields exactly one publisher and runs in single-digit ms.
+    const N = 20000;
+    const lines: string[] = ['codeunit 50100 "Perf Cu"', '{'];
+    for (let i = 0; i < N; i++) {
+      lines.push('    [IntegrationEvent(false, false)]');
+    }
+    for (let i = 0; i < 200; i++) {
+      lines.push(`    // procedure-less tail filler ${i}`);
+    }
+    lines.push('    [IntegrationEvent(false, false)]');
+    lines.push('    procedure OnRealEvent()');
+    lines.push('    begin');
+    lines.push('    end;');
+    lines.push('}');
+    const src = lines.join('\n');
+
+    const start = Date.now();
+    const { publishers } = parseAl(uri, src);
+    const elapsedMs = Date.now() - start;
+
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnRealEvent');
+    // Loose ceiling, far above the bounded-scan cost yet far below the
+    // pre-fix multi-second blow-up; runs by default without flaking on CI.
+    assert.ok(elapsedMs < 2000, `parseAl took ${elapsedMs}ms (expected < 2000ms)`);
+  });
+});
