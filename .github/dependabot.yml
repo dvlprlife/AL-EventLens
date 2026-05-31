@@ -1,0 +1,43 @@
+# Dependabot keeps npm dependencies and GitHub Actions current via weekly,
+# grouped PRs. These PRs are a human-reviewed stream OUTSIDE the agent label
+# state machine (see agents/WORKFLOW.md) — they carry only `dependencies`,
+# never `agent` / `status:*`. Routine minor+patch bumps are grouped to avoid
+# PR spam; a breaking major still opens its own PR (Dependabot's default),
+# giving a dedicated reviewable PR per major — the durable replacement for
+# the manual dev-tooling-major sweeps tracked in #78.
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore"
+      include: "scope"
+    labels:
+      - "dependencies"
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+        patterns:
+          - "*"
+      production-dependencies:
+        dependency-type: "production"
+        patterns:
+          - "*"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+      include: "scope"
+    labels:
+      - "dependencies"
+    groups:
+      github-actions:
+        patterns:
+          - "*"
