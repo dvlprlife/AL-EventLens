@@ -22,6 +22,15 @@ const subscriberAttrRe =
 const procedureRe =
   /^[ \t]*(?:local|internal|protected)?[ \t]*procedure[ \t]+("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)/m;
 
+// Maximum distance (chars) we scan past an event attribute for the
+// `procedure` keyword. Valid AL places `procedure` immediately after the
+// attribute decorator(s); 2048 covers a generous stack of attributes (e.g.
+// [Scope], [Obsolete], [IntegrationEvent]) plus leading whitespace before
+// the keyword. Bounding the scan keeps a procedure-less tail O(window)
+// instead of O(remaining file), which is what causes the extension-host
+// freeze on pathological/adversarial .al (issue #125).
+const PROCEDURE_SEARCH_WINDOW = 2048;
+
 /**
  * Parse a single AL source file's text into the publishers and subscribers
  * it declares.
@@ -151,7 +160,11 @@ interface ProcedureSite {
 }
 
 function findProcedureAfter(text: string, fromIdx: number): ProcedureSite | undefined {
-  const rest = text.slice(fromIdx);
+  // Bound the keyword search to a fixed window so a procedure-less tail is
+  // O(window) instead of O(remaining file) — see PROCEDURE_SEARCH_WINDOW.
+  // The parameter list below is still read against the full `text`, so a
+  // long multi-line signature that extends past the window parses in full.
+  const rest = text.slice(fromIdx, fromIdx + PROCEDURE_SEARCH_WINDOW);
   const m = procedureRe.exec(rest);
   if (!m) {
     return undefined;
