@@ -311,11 +311,98 @@ function stripQuotes(s: string): string {
  * Exported so callers that run their own regex sweeps over AL source (e.g. the
  * indexer's trigger-owner collection) match `parseAl`'s view of the file —
  * commented-out object headers must not be treated as real declarations.
+ *
+ * Implemented as a single forward character scan with four exclusive states
+ * (single-quote string, double-quote quoted identifier, line comment, block
+ * comment). A `//` or `/*` is only a comment opener while in code state, so
+ * comment delimiters that appear *inside* an AL string literal (`'…'`) or
+ * quoted identifier (`"…"`) are left verbatim rather than blanking real code.
+ * AL's doubled-quote escapes (`''` inside `'…'`, `""` inside `"…"`) are
+ * honored so an escaped quote doesn't prematurely close the span. The result
+ * is the same length as the input: only non-newline comment content is blanked
+ * to `' '`; every `\n`/`\r` is preserved, so all downstream line/column and
+ * byte offsets are unchanged.
  */
 export function stripComments(text: string): string {
-  let out = text.replace(/\/\*[\s\S]*?\*\//g, (m) =>
-    m.replace(/[^\n]/g, ' ')
-  );
-  out = out.replace(/\/\/[^\n]*/g, (m) => ' '.repeat(m.length));
-  return out;
+  const out = text.split('');
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const ch = text[i];
+    // 1. Single-quote string: spans lines; only a lone `'` closes it.
+    if (ch === "'") {
+      out[i] = ch;
+      i++;
+      while (i < n) {
+        if (text[i] === "'") {
+          if (text[i + 1] === "'") {
+            // Doubled-quote escape — stays inside the string.
+            out[i] = text[i];
+            out[i + 1] = text[i + 1];
+            i += 2;
+            continue;
+          }
+          out[i] = text[i]; // closing quote
+          i++;
+          break;
+        }
+        out[i] = text[i];
+        i++;
+      }
+      continue;
+    }
+    // 2. Double-quote quoted identifier: same shape as (1) with `"`.
+    if (ch === '"') {
+      out[i] = ch;
+      i++;
+      while (i < n) {
+        if (text[i] === '"') {
+          if (text[i + 1] === '"') {
+            out[i] = text[i];
+            out[i + 1] = text[i + 1];
+            i += 2;
+            continue;
+          }
+          out[i] = text[i];
+          i++;
+          break;
+        }
+        out[i] = text[i];
+        i++;
+      }
+      continue;
+    }
+    // 3. Line comment: blank through to (but not including) the newline.
+    if (ch === '/' && text[i + 1] === '/') {
+      out[i] = ' ';
+      out[i + 1] = ' ';
+      i += 2;
+      while (i < n && text[i] !== '\n') {
+        out[i] = text[i] === '\r' ? '\r' : ' ';
+        i++;
+      }
+      continue;
+    }
+    // 4. Block comment: blank through the first real `*/`; preserve newlines.
+    if (ch === '/' && text[i + 1] === '*') {
+      out[i] = ' ';
+      out[i + 1] = ' ';
+      i += 2;
+      while (i < n) {
+        if (text[i] === '*' && text[i + 1] === '/') {
+          out[i] = ' ';
+          out[i + 1] = ' ';
+          i += 2;
+          break;
+        }
+        out[i] = text[i] === '\n' || text[i] === '\r' ? text[i] : ' ';
+        i++;
+      }
+      continue;
+    }
+    // 5. Code: copy through verbatim.
+    out[i] = ch;
+    i++;
+  }
+  return out.join('');
 }

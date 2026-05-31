@@ -336,6 +336,59 @@ suite('al/parser: mixed and edge cases', () => {
     assert.strictEqual(publishers[0].eventName, 'RealPublisher');
   });
 
+  test("'/*' inside a single-quoted string does not start a block comment", () => {
+    const src = [
+      'codeunit 50402 "C"',
+      '{',
+      '    procedure Progress()',
+      '    begin',
+      "        Message('progress: /* 50%');",
+      '    end;',
+      '',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure RealPublisher()',
+      '    begin',
+      '    end;',
+      '',
+      '    /* trailing note */',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'RealPublisher');
+  });
+
+  test("'//' inside a single-quoted string does not start a line comment", () => {
+    const src = [
+      'codeunit 50403 "C"',
+      '{',
+      "    [EventSubscriber(ObjectType::Codeunit, Codeunit::\"Sales-Post\", OnAfterPostSalesDoc, 'https://x//y', false, false)]",
+      '    local procedure HandleIt()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 1);
+    assert.strictEqual(subscribers[0].targetEvent, 'OnAfterPostSalesDoc');
+  });
+
+  test("quoted identifier containing // or /* is not treated as a comment", () => {
+    const src = [
+      'codeunit 50410 "Weird // Name /* x"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnX()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnX');
+    assert.strictEqual(publishers[0].owner.name, 'Weird // Name /* x');
+  });
+
   test('multi-object file (codeunit + tableextension) attributes attribute to the correct owner', () => {
     const src = [
       'codeunit 50500 "Cu Owner"',
