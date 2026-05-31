@@ -4,6 +4,7 @@
     "moduleResolution": "Node16",
     "target": "ES2022",
     "lib": ["ES2022"],
+    "rootDir": "src",
     "outDir": "dist",
     "sourceMap": true,
     "strict": true,
@@ -14,7 +15,8 @@
     "noUnusedParameters": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
-    "resolveJsonModule": true
+    "resolveJsonModule": true,
+    "types": ["node", "mocha"]
   },
   "include": ["src/**/*"],
   "exclude": ["node_modules", "dist"]
