@@ -172,16 +172,31 @@ export async function loadCachedSymbols(
   // back to a `vscode.Location`; `resolved` is recomputed globally by
   // `resolveSubscribers` after the index is assembled, so the cached
   // value is intentionally not persisted (stored as `false`).
-  const subscribers: Subscriber[] = payload.subscribers.map((s) => ({
-    owner: s.owner,
-    target: s.target,
-    targetEvent: s.targetEvent,
-    location: new vscode.Location(
-      vscode.Uri.parse(s.loc.uri),
-      new vscode.Position(s.loc.line, s.loc.char)
-    ),
-    resolved: false
-  }));
+  //
+  // The revival is the only remaining place data flows from the cache
+  // file into throwing vscode constructors, so it is wrapped to close the
+  // never-throws contract for the whole class rather than field-by-field.
+  // `vscode.Uri.parse` throws `[UriError]` on a string whose scheme holds
+  // illegal characters (e.g. `"a b:c"`) even at the default `strict=false`
+  // — `isCachedSubscriberLike` only checks `typeof loc.uri === 'string'`,
+  // and adding a parse there would push a `vscode` runtime call into the
+  // otherwise-pure validator. Catching here keeps the validator pure and
+  // treats any unrevivable-but-shape-valid element as a clean cache miss.
+  let subscribers: Subscriber[];
+  try {
+    subscribers = payload.subscribers.map((s) => ({
+      owner: s.owner,
+      target: s.target,
+      targetEvent: s.targetEvent,
+      location: new vscode.Location(
+        vscode.Uri.parse(s.loc.uri),
+        new vscode.Position(s.loc.line, s.loc.char)
+      ),
+      resolved: false
+    }));
+  } catch {
+    return undefined;
+  }
   return {
     publishers: payload.publishers,
     subscribers,

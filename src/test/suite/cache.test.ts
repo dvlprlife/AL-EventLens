@@ -522,6 +522,39 @@ suite('index/cache: loadCachedSymbols + storeCachedSymbols', () => {
       'a negative loc coordinate must be a clean cache miss, not a throw');
   });
 
+  test('subscriber loc.uri with an illegal scheme returns undefined (does not throw)', async () => {
+    const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
+    const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
+    await vscode.workspace.fs.createDirectory(symbolsDir);
+    const target = vscode.Uri.joinPath(
+      symbolsDir, `${key.appId}__${key.version}__${key.mtime}.json`
+    );
+    // `vscode.Uri.parse('a b:c')` throws [UriError] "Scheme contains
+    // illegal characters" even at the default strict=false — the scheme
+    // charset check is not gated by strict. `loc.uri` passes the
+    // `typeof === 'string'` gate, so the revival map is where it would
+    // throw. The try/catch around revival must turn it into a cache miss.
+    await vscode.workspace.fs.writeFile(
+      target,
+      new TextEncoder().encode(JSON.stringify({
+        schemaVersion: 5,
+        publishers: [],
+        subscribers: [
+          { owner: { kind: 'codeunit', name: 'Sub' },
+            target: { kind: 'codeunit', name: 'T' },
+            targetEvent: 'E',
+            loc: { uri: 'a b:c', line: 0, char: 0 } }
+        ],
+        triggerOwners: []
+      }))
+    );
+
+    let result: unknown;
+    await assert.doesNotReject(async () => { result = await loadCachedSymbols(ctx, key); });
+    assert.strictEqual(result, undefined,
+      'an unparseable loc.uri must be a clean cache miss, not a throw');
+  });
+
   test('valid JSON with a malformed triggerOwners element returns undefined', async () => {
     const key: CacheKey = { appId: 'X', version: '1.0', mtime: 100 };
     const symbolsDir = vscode.Uri.joinPath(tmpRoot, 'symbols');
