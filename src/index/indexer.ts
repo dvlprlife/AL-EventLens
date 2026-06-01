@@ -242,7 +242,7 @@ export async function buildIndex(
 
   // Pass 2: .alpackages/*.app dependency packages.
   if (scanAlpackages) {
-    const allAppUris = await vscode.workspace.findFiles('**/.alpackages/*.app');
+    const allAppUris = await vscode.workspace.findFiles('**/.alpackages/*.app', '**/node_modules/**');
     // Read each package's NavxManifest.xml once (cheap path — no
     // SymbolReference decompression). Every step below consults this single
     // map — workspace-twin exclusion, version selection, and the
@@ -376,7 +376,9 @@ export async function buildIndex(
       for (const owner of r.triggerOwners) {
         triggerOwners.set(triggerOwnerKey(owner), owner);
       }
-      visitedKeys.add(orphanCacheKey(r.appId, r.appVersion));
+      // Lower-case appId here too, consistent with dedupByAppIdVersion, so
+      // case-differing manifests for the same app count as one visited key.
+      visitedKeys.add(orphanCacheKey(r.appId.toLowerCase(), r.appVersion));
     }
     // Best-effort one-time schema-mismatch sweep — drops any
     // pre-current-schema cache files left behind by older releases.
@@ -515,14 +517,19 @@ function selectHighestVersionPerAppId(
       // Metadata read failed earlier (already warned) — drop the URI.
       continue;
     }
-    const existing = winners.get(meta.appId);
+    // Key on the lower-cased appId: GUID casing varies between `app.json`
+    // and `NavxManifest.xml`, and the rest of the indexer (excludeWorkspaceApps,
+    // triggerOwnerKey) already normalizes this way. The emitted `appId` stays
+    // source-cased — only the grouping key is normalized.
+    const appKey = meta.appId.toLowerCase();
+    const existing = winners.get(appKey);
     if (!existing) {
-      winners.set(meta.appId, { uri, version: meta.version });
+      winners.set(appKey, { uri, version: meta.version });
       continue;
     }
     const cmp = compareVersions(meta.version, existing.version);
     if (cmp > 0) {
-      winners.set(meta.appId, { uri, version: meta.version });
+      winners.set(appKey, { uri, version: meta.version });
     } else if (cmp === 0) {
       console.warn(
         `AL EventLens: duplicate .app for appId=${meta.appId} version=${meta.version} ` +
@@ -571,7 +578,11 @@ function dedupByAppIdVersion(
       kept.push(uri);
       continue;
     }
-    const key = orphanCacheKey(meta.appId, meta.version);
+    // Lower-case appId for the dedup key (GUID casing varies between
+    // app.json and NavxManifest.xml). `orphanCacheKey` itself is left raw-case
+    // so it stays byte-identical to `cacheFileUri`/the cleanup-sweep prefix;
+    // only this in-memory dedup key is normalized.
+    const key = orphanCacheKey(meta.appId.toLowerCase(), meta.version);
     const existing = seen.get(key);
     if (existing) {
       console.warn(
