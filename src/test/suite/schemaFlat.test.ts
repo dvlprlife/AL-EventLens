@@ -130,6 +130,28 @@ suite('symbols/schemaFlat: happy path', () => {
     assert.strictEqual(byKind.get('tableextension'), 'OnTableExt');
     assert.strictEqual(byKind.get('pageextension'), 'OnPageExt');
   });
+
+  test('extracts events from ReportExtensions', () => {
+    // Regression for issue #157: BC `reportextension` objects can declare
+    // `[IntegrationEvent]`/`[BusinessEvent]` procedures, preserved in
+    // `SymbolReference.json` under the `ReportExtensions[]` key (parallel to
+    // the `TableExtensions`/`PageExtensions` keys added in #123). Previously
+    // dropped because `CONTAINER_KINDS` omitted the key — even though the AL
+    // source parser already treats `reportextension` as event-hosting.
+    const json = {
+      ReportExtensions: [
+        {
+          Id: 50900,
+          Name: 'My Report Ext',
+          Methods: [{ Name: 'OnReportExt', Attributes: [{ Name: 'IntegrationEvent' }] }]
+        }
+      ]
+    };
+    const publishers = parseFlatSymbols(json, APP_ID);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].owner.kind, 'reportextension');
+    assert.strictEqual(publishers[0].eventName, 'OnReportExt');
+  });
 });
 
 suite('symbols/schemaFlat: filtering', () => {

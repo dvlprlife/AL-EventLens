@@ -7,6 +7,7 @@ const CONTAINER_KINDS: ReadonlyArray<readonly [string, ObjectKind]> = [
   ['Pages', 'page'],
   ['PageExtensions', 'pageextension'],
   ['Reports', 'report'],
+  ['ReportExtensions', 'reportextension'],
   ['Queries', 'query'],
   ['XmlPorts', 'xmlport'],
   ['Interfaces', 'interface']

@@ -130,6 +130,30 @@ suite('symbols/schemaNamespaces: happy path', () => {
     assert.strictEqual(kinds.get('tableextension'), 'OnTableExt');
     assert.strictEqual(kinds.get('pageextension'), 'OnPageExt');
   });
+
+  test('extracts ReportExtension events through the nested walk', () => {
+    // Regression for issue #157: the `ReportExtensions[]` key added to
+    // `CONTAINER_KINDS` must also surface under the BC 24+ nested schema, since
+    // `walkNamespaceTree` reuses the same enumeration as the flat parser.
+    const json = {
+      Namespaces: [
+        {
+          Name: 'Extensions',
+          ReportExtensions: [
+            {
+              Id: 50900,
+              Name: 'RptExt',
+              Methods: [{ Name: 'OnReportExt', Attributes: [{ Name: 'IntegrationEvent' }] }]
+            }
+          ]
+        }
+      ]
+    };
+    const publishers = parseNamespacesSymbols(json, APP_ID);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].owner.kind, 'reportextension');
+    assert.strictEqual(publishers[0].eventName, 'OnReportExt');
+  });
 });
 
 suite('symbols/schemaNamespaces: filtering and edge cases', () => {
