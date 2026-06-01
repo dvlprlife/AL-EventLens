@@ -68,10 +68,20 @@ export function parseAl(
     if (!proc) {
       continue;
     }
+    // The bounded procedure search (PROCEDURE_SEARCH_WINDOW) can reach into the
+    // NEXT object when an attribute is left dangling with no procedure beneath
+    // it (common mid-edit). `ownerForLine` returns the same ObjectRef instance
+    // for every line in one object, so an identity mismatch means the procedure
+    // crossed an object boundary — drop the match rather than bind a phantom
+    // publisher to the wrong object (issue #159).
+    const procOwner = ownerForLine(proc.line);
+    if (procOwner !== ownerForLine(absToLineCol(cleaned, m.index ?? 0).line)) {
+      continue;
+    }
     const kind: EventKind =
       m[1].toLowerCase() === 'integrationevent' ? 'integration' : 'business';
     publishers.push({
-      owner: ownerForLine(proc.line),
+      owner: procOwner,
       eventName: stripQuotes(proc.name),
       kind,
       location: new vscode.Location(uri, new vscode.Position(proc.line, proc.col)),
@@ -92,8 +102,14 @@ export function parseAl(
     if (!targetKind || !targetName || !targetEvent) {
       continue;
     }
+    // Same cross-object guard as the publisher loop (issue #159): a dangling
+    // [EventSubscriber] must not bind to the next object's procedure.
+    const procOwner = ownerForLine(proc.line);
+    if (procOwner !== ownerForLine(absToLineCol(cleaned, m.index ?? 0).line)) {
+      continue;
+    }
     subscribers.push({
-      owner: ownerForLine(proc.line),
+      owner: procOwner,
       target: { kind: targetKind, name: targetName },
       targetEvent,
       location: new vscode.Location(uri, new vscode.Position(proc.line, proc.col)),
