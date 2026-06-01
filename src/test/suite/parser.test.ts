@@ -581,3 +581,67 @@ suite('al/parser: procedure-search window (#125)', () => {
     assert.ok(elapsedMs < 2000, `parseAl took ${elapsedMs}ms (expected < 2000ms)`);
   });
 });
+
+suite('al/parser: cross-object attribute binding (#159)', () => {
+  test('orphan publisher attribute does not bind to the next object\'s procedure', () => {
+    // Object A's [IntegrationEvent] has no procedure beneath it (common
+    // mid-edit). The bounded search can reach object B's procedure, but the
+    // owner-boundary guard must drop the match rather than emit a phantom
+    // publisher attributed to B.
+    const src = [
+      'codeunit 50100 "A"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '}',
+      'codeunit 50101 "B"',
+      '{',
+      '    procedure OnFromB()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 0,
+      'a dangling attribute in object A must not bind to a procedure in object B');
+  });
+
+  test('orphan subscriber attribute does not bind across an object boundary', () => {
+    const src = [
+      'codeunit 50100 "A"',
+      '{',
+      '    [EventSubscriber(ObjectType::Codeunit, Codeunit::"Sales-Post", OnAfterPostSalesDoc, \'\', false, false)]',
+      '}',
+      'codeunit 50101 "B"',
+      '{',
+      '    procedure HandlerInB()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 0,
+      'a dangling subscriber attribute in A must not bind to a procedure in B');
+  });
+
+  test('an attribute and its procedure in the SAME object still resolve (no regression)', () => {
+    const src = [
+      'codeunit 50100 "A"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnInA()',
+      '    begin',
+      '    end;',
+      '}',
+      'codeunit 50101 "B"',
+      '{',
+      '    procedure Unrelated()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnInA');
+    assert.strictEqual(publishers[0].owner.name, 'A');
+  });
+});
