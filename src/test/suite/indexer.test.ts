@@ -105,6 +105,9 @@ let originalGetConfig: typeof vscode.workspace.getConfiguration;
 let originalConsoleWarn: typeof console.warn;
 let warnCalls: string[];
 let appReadCount: number;
+// Captures the `exclude` arg passed to findFiles for the .alpackages glob,
+// so a test can assert Pass 2 excludes node_modules (issue #158).
+let appFindExclude: string | undefined;
 
 function applyPatches(p: Patches): void {
   originalFindFiles = vscode.workspace.findFiles;
@@ -113,16 +116,20 @@ function applyPatches(p: Patches): void {
   originalConsoleWarn = console.warn;
   warnCalls = [];
   appReadCount = 0;
+  appFindExclude = undefined;
 
   // findFiles: route by glob.
   Object.defineProperty(vscode.workspace, 'findFiles', {
     configurable: true,
-    value: async (include: vscode.GlobPattern): Promise<vscode.Uri[]> => {
+    value: async (include: vscode.GlobPattern, exclude?: vscode.GlobPattern): Promise<vscode.Uri[]> => {
       const pattern = typeof include === 'string' ? include : include.pattern;
       if (pattern === '**/*.al') {
         return p.alFiles ?? [];
       }
       if (pattern === '**/.alpackages/*.app') {
+        appFindExclude = exclude === undefined
+          ? undefined
+          : (typeof exclude === 'string' ? exclude : exclude.pattern);
         return p.appFiles ?? [];
       }
       if (pattern === '**/app.json') {
@@ -968,6 +975,48 @@ suite('index/indexer: buildIndex', () => {
     assert.strictEqual(events[0], 'OnFromA');
     const dupWarn = warnCalls.find((m) => m.includes('duplicate .app for appId'));
     assert.ok(dupWarn, `expected a "duplicate .app for appId" warning, got: ${JSON.stringify(warnCalls)}`);
+  });
+
+  test('same app whose manifest Id differs only in GUID case collapses to its highest version (#158)', async () => {
+    // GUID casing varies between app.json and NavxManifest.xml. Two `.app`
+    // files for the same logical app differing only in manifest-Id case must
+    // be treated as ONE app by the highest-version selection.
+    const UPPER = 'AAAAAAAA-1111-2222-3333-444444444444';
+    const LOWER = 'aaaaaaaa-1111-2222-3333-444444444444';
+    const v1 = vscode.Uri.parse('file:///workspace/.alpackages/Same_1.0.0.0.app');
+    const v2 = vscode.Uri.parse('file:///workspace/.alpackages/Same_2.0.0.0.app');
+    const v1Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(UPPER, '1.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(UPPER, 'OnV1')
+    });
+    const v2Bytes = await buildAppBytes({
+      manifestXml: buildAppManifest(LOWER, '2.0.0.0'),
+      symbolReferenceJson: buildVersionedSymbol(LOWER, 'OnV2')
+    });
+    applyPatches({
+      alFiles: [],
+      appFiles: [v1, v2],
+      fs: { bytes: new Map([[v1.toString(), v1Bytes], [v2.toString(), v2Bytes]]) },
+      includeTriggerEvents: false
+    });
+
+    const idx = await buildIndex(fakeContext());
+
+    // Match case-insensitively (the two manifests differ only in case).
+    const events = idx.publishers
+      .filter((p) => (p.owner.appId ?? '').toLowerCase() === LOWER)
+      .map((p) => p.eventName);
+    // Pre-fix: raw-case keys treated these as two different apps → [OnV1, OnV2].
+    // Post-fix: collapsed to one app, highest version wins → [OnV2].
+    assert.deepStrictEqual(events, ['OnV2'],
+      `case-only appId difference must collapse to the highest version; got ${JSON.stringify(events)}`);
+  });
+
+  test('Pass 2 .alpackages scan excludes node_modules (#158)', async () => {
+    applyPatches({ alFiles: [], appFiles: [], fs: { bytes: new Map() } });
+    await buildIndex(fakeContext());
+    assert.strictEqual(appFindExclude, '**/node_modules/**',
+      'the .alpackages findFiles must exclude node_modules, matching the .al and app.json passes');
   });
 
   test('includeAllAppVersions: same (appId, Version) twin collapses to one; distinct version survives (#129)', async () => {
