@@ -1,0 +1,72 @@
+name: Bug report
+description: Something in AL EventLens isn't working as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The fields below mirror what's
+        needed to reproduce indexing problems — most AL EventLens bugs depend on
+        *where* the events live (workspace `.al` vs `.alpackages/*.app`) and which
+        BC syntax/schema generation is involved.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug.
+      placeholder: e.g. A subscriber using the BC22+ `Codeunit::"Sales-Post"` syntax shows as unresolved even though BaseApp is in .alpackages.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a workspace with ...
+        2. Run `AL EventLens: Open Panel`
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What you expected to happen instead.
+    validations:
+      required: true
+  - type: input
+    id: extension-version
+    attributes:
+      label: AL EventLens version
+      description: Extensions view → AL EventLens, or `code --list-extensions --show-versions`.
+      placeholder: e.g. 0.1.5
+    validations:
+      required: true
+  - type: input
+    id: vscode-version
+    attributes:
+      label: VS Code version and environment
+      description: Help → About. Note if you are on VS Code Web (vscode.dev / github.dev) — the extension also runs there and file access behaves differently.
+      placeholder: e.g. 1.99.0 desktop on Windows 11, or vscode.dev
+    validations:
+      required: true
+  - type: textarea
+    id: al-context
+    attributes:
+      label: AL project context
+      description: |
+        Where do the affected events come from? This usually determines the code path.
+      placeholder: |
+        - Source of the affected publisher/subscriber: workspace .al / .alpackages .app (which app? e.g. Microsoft BaseApp 24.x)
+        - BC / AL runtime version (app.json), and whether subscribers use the pre-BC22 string-literal syntax or the BC22+ `Codeunit::"Name"` syntax
+        - Workspace layout: single project / multi-root, number of .app files in .alpackages
+        - Relevant settings changed from defaults (e.g. alEventLens.includeAllAppVersions, alEventLens.scanAlpackages)
+    validations:
+      required: false
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs, error messages, or screenshots
+      description: Anything from the notification toasts, the status bar, or the Developer Tools console (Help → Toggle Developer Tools).
+    validations:
+      required: false

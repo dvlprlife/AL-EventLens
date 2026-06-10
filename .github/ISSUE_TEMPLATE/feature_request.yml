@@ -1,0 +1,33 @@
+name: Feature request
+description: Suggest an improvement or new capability for AL EventLens.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What are you trying to do that AL EventLens doesn't support today?
+      placeholder: e.g. When reviewing a PR I want to see which events a changed codeunit publishes without opening the panel.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: What you'd like to happen. Reference existing surfaces (panel, activity-bar trees, CodeLens, Mermaid export, settings) where it helps.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Workarounds you use today, or other ways this could be solved.
+    validations:
+      required: false
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Screenshots, example AL code, links.
+    validations:
+      required: false
