@@ -63,6 +63,10 @@ All commands are available through the Command Palette (search for "AL EventLens
 
 Please file issues and feature requests on [GitHub](https://github.com/dvlprlife/AL-EventLens).
 
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, build/test commands, and pull-request expectations.
+
 ## License
 
 MIT
