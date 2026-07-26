@@ -24,6 +24,7 @@ AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscri
 - **Publishers view** — A dedicated `AL EventLens` activity-bar view drills four levels: source app (friendly `Name` + vendor from `NavxManifest.xml`, GUID fallback when missing) → AL object kind → object → event. Intermediate rows show `(events / subscribers)` counts so a busy subtree is obvious at a glance; every row has a codicon so the level reads without reading labels.
 - **Subscribers view** — A second activity-bar tree, below Publishers, lists every subscriber the workspace declares — grouped owning app → object kind → object → subscribed event — with a `✓` / `⚠` resolved badge per row. Unlike the publisher-nested list, this surfaces **unresolved** subscribers (whose target app is missing from `.alpackages`), which otherwise appear nowhere. Click a row to open the panel focused on that subscriber.
 - **CodeLens** — Live subscriber-count CodeLens above each `[IntegrationEvent]` and `[BusinessEvent]` declaration. Click it to open the panel scoped to that publisher.
+- **Handler-function CodeLens** — Above each test handler method (`[MessageHandler]`, `[ConfirmHandler]`, `[PageHandler]`, and the other nine handler attributes), a lens shows how many test methods name it in their `[HandlerFunctions]` attribute; click it for a references peek listing them. A handler no test references reads **`unused handler`** — dead test code the AL compiler never flags, since it only checks the opposite direction. Counting is scoped to the declaring test codeunit, matching how AL resolves handlers.
 - **Mermaid export** — One command renders the current publisher's subscriber set as a Mermaid diagram for docs or design reviews.
 - **Incremental re-index on save** — Saved AL files re-parse just the touched objects; the rest of the index stays warm.
 - **Indexing progress in the status bar** — The initial workspace scan reports per-phase progress (scanning AL files, scanning `.alpackages`, per-package reads, synthesizing triggers, resolving subscriber links) in the status bar, so large workspaces never look frozen during startup.
@@ -40,6 +41,7 @@ AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscri
 | `AL EventLens: Reveal Object` | Open the panel and filter the publisher list to a specific AL object (fired by clicking an object row in the activity-bar tree). |
 | `AL EventLens: Reveal Subscriber` | Open the panel in Subscribers mode focused on a subscriber (fired by clicking a row in the Subscribers view). |
 | `AL EventLens: Go to Subscriber` | Jump to the source location of a subscriber selected in the panel. |
+| `AL EventLens: Show Handler Usages` | Peek the test methods that reference a handler method (fired by the handler CodeLens). |
 | `AL EventLens: Export to Mermaid` | Copy a Mermaid diagram of the current publisher's subscribers to the clipboard. |
 
 All commands are available through the Command Palette (search for "AL EventLens") and through the activity-bar view.
@@ -54,6 +56,7 @@ All commands are available through the Command Palette (search for "AL EventLens
 | `alEventLens.includeAllAppVersions` | `false` | When `.alpackages` carries multiple versions of the same app, index all of them instead of just the highest. |
 | `alEventLens.includeTriggerEvents` | `true` | Synthesize virtual publishers for table/page trigger events. |
 | `alEventLens.codeLens.enabled` | `true` | Show subscriber-count CodeLens above event declarations. |
+| `alEventLens.handlerCodeLens.enabled` | `true` | Show test-usage-count CodeLens above test handler methods. |
 
 ## Requirements
 

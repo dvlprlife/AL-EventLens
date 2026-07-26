@@ -9,6 +9,7 @@ import { AlEventLensCodeLensProvider, registerCodeLens } from '../../ui/codelens
 
 interface ConfigPatches {
   codeLensEnabled?: boolean;
+  handlerCodeLensEnabled?: boolean;
 }
 
 let originalGetConfig: typeof vscode.workspace.getConfiguration;
@@ -25,6 +26,9 @@ function patchConfig(p: ConfigPatches): void {
         get: <T>(key: string, defaultValue?: T): T => {
           if (key === 'codeLens.enabled') {
             return (p.codeLensEnabled ?? true) as unknown as T;
+          }
+          if (key === 'handlerCodeLens.enabled') {
+            return (p.handlerCodeLensEnabled ?? true) as unknown as T;
           }
           return defaultValue as T;
         },
@@ -116,6 +120,42 @@ const TABLE_NO_PUBLISHERS_AL = [
   '    {',
   '        field(1; "No."; Code[20]) { }',
   '    }',
+  '}'
+].join('\n');
+
+// Two test methods reference MessageHandler, one references ConfirmYes, and
+// ConfirmNo is referenced by nothing — the "unused handler" case.
+const HANDLERS_AL = [
+  'codeunit 50300 "Sales Tests"',
+  '{',
+  '    SubType = Test;',
+  '',
+  '    [Test]',
+  "    [HandlerFunctions('MessageHandler,ConfirmYes')]",
+  '    procedure TestA()',
+  '    begin',
+  '    end;',
+  '',
+  '    [Test]',
+  "    [HandlerFunctions('MessageHandler')]",
+  '    procedure TestB()',
+  '    begin',
+  '    end;',
+  '',
+  '    [MessageHandler]',
+  '    procedure MessageHandler(Msg: Text[1024])',
+  '    begin',
+  '    end;',
+  '',
+  '    [ConfirmHandler]',
+  '    procedure ConfirmYes(Q: Text[1024]; var R: Boolean)',
+  '    begin',
+  '    end;',
+  '',
+  '    [ConfirmHandler]',
+  '    procedure ConfirmNo(Q: Text[1024]; var R: Boolean)',
+  '    begin',
+  '    end;',
   '}'
 ].join('\n');
 
@@ -573,6 +613,245 @@ suite('ui/codelens: registerCodeLens', () => {
         configurable: true,
         value: original
       });
+    }
+  });
+});
+
+suite('ui/codelens: handler lenses (#177)', () => {
+  teardown(() => restoreConfig());
+
+  const handlerDoc = (): vscode.TextDocument =>
+    fakeDoc(vscode.Uri.parse('file:///workspace/SalesTests.Codeunit.al'), HANDLERS_AL);
+
+  /** Lens titles, keyed by the lens's start line, for easier assertions. */
+  function titles(lenses: ReadonlyArray<vscode.CodeLens>): string[] {
+    return lenses.map((l) => l.command?.title ?? '');
+  }
+
+  test('one lens per handler method, with usage counts and the unused case', () => {
+    patchConfig({});
+    const store = new EventIndexStore();
+    try {
+      const lenses = new AlEventLensCodeLensProvider(store).provideCodeLenses(handlerDoc());
+      // No [IntegrationEvent]/[BusinessEvent] in this fixture, so every lens
+      // is a handler lens: MessageHandler, ConfirmYes, ConfirmNo.
+      assert.strictEqual(lenses.length, 3);
+      assert.deepStrictEqual(titles(lenses), [
+        '2 test usages',
+        '1 test usage',
+        'unused handler'
+      ]);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a used handler lens invokes showHandlerUsages with (declaration, usage locations)', () => {
+    patchConfig({});
+    const store = new EventIndexStore();
+    try {
+      const lenses = new AlEventLensCodeLensProvider(store).provideCodeLenses(handlerDoc());
+      const used = lenses[0];
+      assert.strictEqual(used.command?.command, 'alEventLens.showHandlerUsages');
+      const args = used.command?.arguments as [vscode.Location, vscode.Location[]];
+      assert.strictEqual(args.length, 2);
+      assert.ok(args[0] instanceof vscode.Location, 'first arg is the handler location');
+      assert.strictEqual(args[1].length, 2, 'both referencing test methods are passed');
+      // The peek targets the two [HandlerFunctions] test procedures, whose
+      // declarations sit above the handler in the fixture.
+      assert.ok(args[1].every((l) => l instanceof vscode.Location));
+      assert.ok(
+        args[1][0].range.start.line < args[0].range.start.line,
+        'usage locations point at the test methods, not the handler itself'
+      );
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('the unused-handler lens is rendered as non-clickable text', () => {
+    patchConfig({});
+    const store = new EventIndexStore();
+    try {
+      const lenses = new AlEventLensCodeLensProvider(store).provideCodeLenses(handlerDoc());
+      const unused = lenses[2];
+      assert.strictEqual(unused.command?.title, 'unused handler');
+      assert.strictEqual(unused.command?.command, '', 'empty command → plain text');
+      assert.strictEqual(unused.command?.arguments, undefined);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('handlerCodeLens.enabled: false suppresses handler lenses', () => {
+    patchConfig({ handlerCodeLensEnabled: false });
+    const store = new EventIndexStore();
+    try {
+      const lenses = new AlEventLensCodeLensProvider(store).provideCodeLenses(handlerDoc());
+      assert.strictEqual(lenses.length, 0);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('the two lens kinds are gated independently', () => {
+    // A document carrying BOTH an event publisher and a handler: turning off
+    // either setting must leave the other kind untouched.
+    const mixed = [
+      'codeunit 50400 "Mixed"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterFoo()',
+      '    begin',
+      '    end;',
+      '',
+      "    [HandlerFunctions('H')]",
+      '    procedure TestA()',
+      '    begin',
+      '    end;',
+      '',
+      '    [MessageHandler]',
+      '    procedure H(Msg: Text[1024])',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const doc = fakeDoc(vscode.Uri.parse('file:///workspace/Mixed.al'), mixed);
+
+    const run = (p: ConfigPatches): string[] => {
+      patchConfig(p);
+      const store = new EventIndexStore();
+      try {
+        return titles(new AlEventLensCodeLensProvider(store).provideCodeLenses(doc));
+      } finally {
+        store.dispose();
+        restoreConfig();
+      }
+    };
+
+    assert.deepStrictEqual(run({}), ['0 subscribers', '1 test usage']);
+    assert.deepStrictEqual(run({ codeLensEnabled: false }), ['1 test usage']);
+    assert.deepStrictEqual(run({ handlerCodeLensEnabled: false }), ['0 subscribers']);
+  });
+
+  test('a document with no handlers emits no handler lenses', () => {
+    patchConfig({});
+    const store = new EventIndexStore();
+    try {
+      const doc = fakeDoc(vscode.Uri.parse('file:///workspace/MyTable.al'), TABLE_NO_PUBLISHERS_AL);
+      assert.strictEqual(new AlEventLensCodeLensProvider(store).provideCodeLenses(doc).length, 0);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('onDidChangeCodeLenses fires for handlerCodeLens.enabled, not for an unrelated setting', () => {
+    // Captures the provider registerCodeLens actually built (via the
+    // registerCodeLensProvider hook) and listens to ITS event — asserting
+    // against a locally-constructed provider would pass even if the
+    // handlerCodeLens branch were deleted from the config-change handler.
+    patchConfig({});
+    const store = new EventIndexStore();
+    let registered: vscode.Disposable | undefined;
+
+    const originalRegister = vscode.languages.registerCodeLensProvider;
+    let captured: vscode.CodeLensProvider | undefined;
+    Object.defineProperty(vscode.languages, 'registerCodeLensProvider', {
+      configurable: true,
+      value: (
+        selector: vscode.DocumentSelector,
+        provider: vscode.CodeLensProvider
+      ): vscode.Disposable => {
+        captured = provider;
+        return originalRegister.call(vscode.languages, selector, provider);
+      }
+    });
+
+    const originalOnDidChangeConfig = vscode.workspace.onDidChangeConfiguration;
+    let fire: ((e: vscode.ConfigurationChangeEvent) => void) | undefined;
+    Object.defineProperty(vscode.workspace, 'onDidChangeConfiguration', {
+      configurable: true,
+      value: (listener: (e: vscode.ConfigurationChangeEvent) => void): vscode.Disposable => {
+        fire = listener;
+        return { dispose: (): void => undefined };
+      }
+    });
+
+    try {
+      registered = registerCodeLens(fakeContext, store);
+      assert.ok(captured, 'registerCodeLens registered a provider');
+      assert.ok(fire, 'registerCodeLens subscribed to configuration changes');
+
+      let fired = 0;
+      const sub = captured.onDidChangeCodeLenses?.(() => fired++);
+      assert.ok(sub, 'the registered provider exposes onDidChangeCodeLenses');
+
+      const changeOf = (affected: string): vscode.ConfigurationChangeEvent =>
+        ({ affectsConfiguration: (s: string) => s === affected }) as vscode.ConfigurationChangeEvent;
+
+      fire(changeOf('alEventLens.handlerCodeLens.enabled'));
+      assert.strictEqual(fired, 1, 'handlerCodeLens.enabled must refresh the lenses');
+
+      fire(changeOf('alEventLens.codeLens.enabled'));
+      assert.strictEqual(fired, 2, 'codeLens.enabled must still refresh the lenses');
+
+      fire(changeOf('editor.fontSize'));
+      assert.strictEqual(fired, 2, 'an unrelated setting must not refresh the lenses');
+
+      sub.dispose();
+    } finally {
+      registered?.dispose();
+      store.dispose();
+      Object.defineProperty(vscode.languages, 'registerCodeLensProvider', {
+        configurable: true,
+        value: originalRegister
+      });
+      Object.defineProperty(vscode.workspace, 'onDidChangeConfiguration', {
+        configurable: true,
+        value: originalOnDidChangeConfig
+      });
+    }
+  });
+
+  test('both lens kinds disabled: the document is never read', () => {
+    patchConfig({ codeLensEnabled: false, handlerCodeLensEnabled: false });
+    const store = new EventIndexStore();
+    try {
+      let reads = 0;
+      const doc = {
+        uri: vscode.Uri.parse('file:///workspace/SalesTests.Codeunit.al'),
+        languageId: 'al',
+        getText: (): string => {
+          reads++;
+          return HANDLERS_AL;
+        }
+      } as unknown as vscode.TextDocument;
+      assert.strictEqual(new AlEventLensCodeLensProvider(store).provideCodeLenses(doc).length, 0);
+      assert.strictEqual(reads, 0, 'gating must short-circuit before getText()');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a single parse serves both lens kinds', () => {
+    // Regression guard for the shared AlObjectContext: the provider must read
+    // the document once per refresh, not once per parser entry point.
+    patchConfig({});
+    const store = new EventIndexStore();
+    try {
+      let reads = 0;
+      const doc = {
+        uri: vscode.Uri.parse('file:///workspace/Mixed.al'),
+        languageId: 'al',
+        getText: (): string => {
+          reads++;
+          return HANDLERS_AL;
+        }
+      } as unknown as vscode.TextDocument;
+      new AlEventLensCodeLensProvider(store).provideCodeLenses(doc);
+      assert.strictEqual(reads, 1);
+    } finally {
+      store.dispose();
     }
   });
 });

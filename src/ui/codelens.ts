@@ -1,5 +1,7 @@
 import * as vscode from 'vscode';
-import { parseAl } from '../al/parser';
+import { handlerUsageKey, indexHandlerUsages, parseHandlersFrom } from '../al/handlers';
+import type { AlObjectContext } from '../al/parser';
+import { makeObjectContext, parseAlFrom } from '../al/parser';
 import { countSubscribersByPublisherKey, publisherKey } from '../index/match';
 import type { EventIndexStore } from '../index/store';
 
@@ -45,17 +47,35 @@ export class AlEventLensCodeLensProvider implements vscode.CodeLensProvider {
   }
 
   public provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
-    // Read the setting fresh on every call so users can toggle without
+    // Read the settings fresh on every call so users can toggle without
     // a window reload.
-    const enabled = vscode.workspace
-      .getConfiguration('alEventLens')
-      .get<boolean>('codeLens.enabled', true);
-    if (!enabled) {
+    const cfg = vscode.workspace.getConfiguration('alEventLens');
+    const wantEvents = cfg.get<boolean>('codeLens.enabled', true);
+    const wantHandlers = cfg.get<boolean>('handlerCodeLens.enabled', true);
+    // Short-circuit before touching the document: with both lens kinds off
+    // there is nothing to draw, and VS Code still calls this on every edit
+    // and scroll of every open `al` editor.
+    if (!wantEvents && !wantHandlers) {
       return [];
     }
 
-    // `parseAl` arg order is `(uri, text)` — do not swap.
-    const parsed = parseAl(document.uri, document.getText());
+    // One context for both sweeps: `makeObjectContext` runs `stripComments`
+    // and `findObjects` over the whole document, so building it per parser
+    // entry point would scan the file twice on every refresh.
+    const ctx = makeObjectContext(document.getText());
+    if (!ctx) {
+      return [];
+    }
+
+    return [
+      ...(wantEvents ? this.eventLenses(document.uri, ctx) : []),
+      ...(wantHandlers ? handlerLenses(document.uri, ctx) : [])
+    ];
+  }
+
+  /** `"N subscribers"` above each `[IntegrationEvent]` / `[BusinessEvent]`. */
+  private eventLenses(uri: vscode.Uri, ctx: AlObjectContext): vscode.CodeLens[] {
+    const parsed = parseAlFrom(uri, ctx);
     if (parsed.publishers.length === 0) {
       return [];
     }
@@ -91,10 +111,54 @@ export class AlEventLensCodeLensProvider implements vscode.CodeLensProvider {
 }
 
 /**
+ * `"N test usages"` / `"unused handler"` above each handler method
+ * (`[MessageHandler]`, `[ConfirmHandler]`, `[PageHandler]`, …).
+ *
+ * Unlike the event lenses this needs no store lookup: AL resolves handler
+ * references within a single test codeunit, so every reference that can
+ * possibly count is in the document being parsed. That also means the lens
+ * is correct the instant a file is opened, with no dependency on indexing
+ * having finished.
+ *
+ * A handler with usages is clickable and opens VS Code's native references
+ * peek at the referencing test methods. A handler with none is dead test
+ * code — the AL compiler flags a `[HandlerFunctions]` entry naming a handler
+ * that doesn't exist, but never the reverse — so it is rendered as plain,
+ * non-clickable text (a `CodeLens` whose command is the empty string).
+ */
+function handlerLenses(uri: vscode.Uri, ctx: AlObjectContext): vscode.CodeLens[] {
+  const { declarations, references } = parseHandlersFrom(uri, ctx);
+  if (declarations.length === 0) {
+    return [];
+  }
+
+  const usages = indexHandlerUsages(references);
+
+  return declarations.map((d) => {
+    const used = usages.get(handlerUsageKey(d.owner, d.name)) ?? [];
+    if (used.length === 0) {
+      return new vscode.CodeLens(d.location.range, {
+        command: '',
+        title: 'unused handler'
+      });
+    }
+    return new vscode.CodeLens(d.location.range, {
+      command: 'alEventLens.showHandlerUsages',
+      title: `${used.length} test ${used.length === 1 ? 'usage' : 'usages'}`,
+      arguments: [d.location, used.map((r) => r.location)]
+    });
+  });
+}
+
+/**
  * Register the CodeLens provider that draws a "N subscribers" lens above
- * each `[IntegrationEvent]` and `[BusinessEvent]` declaration. Clicking
- * the lens fires `alEventLens.revealPublisher` to open the panel scoped
- * to that publisher. Gated by `alEventLens.codeLens.enabled`.
+ * each `[IntegrationEvent]` and `[BusinessEvent]` declaration, and a
+ * "N test usages" / "unused handler" lens above each test handler method.
+ * Clicking a publisher lens fires `alEventLens.revealPublisher` to open the
+ * panel scoped to that publisher; clicking a handler lens fires
+ * `alEventLens.showHandlerUsages` to peek its referencing test methods.
+ * Gated by `alEventLens.codeLens.enabled` and
+ * `alEventLens.handlerCodeLens.enabled` respectively.
  *
  * The returned disposable owns the provider registration, the
  * `store.onDidChange` subscription, the configuration-change
@@ -119,7 +183,10 @@ export function registerCodeLens(
 
   // Setting toggle takes effect without a window reload.
   const cfgSub = vscode.workspace.onDidChangeConfiguration((e) => {
-    if (e.affectsConfiguration('alEventLens.codeLens.enabled')) {
+    if (
+      e.affectsConfiguration('alEventLens.codeLens.enabled') ||
+      e.affectsConfiguration('alEventLens.handlerCodeLens.enabled')
+    ) {
       provider.fireChange();
     }
   });

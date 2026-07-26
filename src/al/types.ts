@@ -95,6 +95,39 @@ export interface Publisher {
   readonly parameters?: ReadonlyArray<Parameter>;
 }
 
+/**
+ * A test **handler method** — a procedure carrying one of AL's handler
+ * attributes (`[MessageHandler]`, `[ConfirmHandler]`, `[PageHandler]`, …).
+ * These are only legal inside a codeunit with `SubType = Test`.
+ */
+export interface HandlerDeclaration {
+  /** Codeunit declaring the handler. */
+  readonly owner: ObjectRef;
+  /** The handler procedure's own name — the name tests reference it by. */
+  readonly name: string;
+  /** The attribute that marks it, source-cased, e.g. `MessageHandler`. */
+  readonly handlerKind: string;
+  /** Source location of the procedure declaration. */
+  readonly location: vscode.Location;
+}
+
+/**
+ * One `[HandlerFunctions('A,B')]` attribute — a test method's declaration of
+ * the handler methods it uses. AL resolves these **within the same test
+ * codeunit only**, so `owner` scopes the reference completely; there is no
+ * cross-file or cross-app target as there is for a `Subscriber`.
+ */
+export interface HandlerReference {
+  /** Codeunit declaring the referencing test method. */
+  readonly owner: ObjectRef;
+  /** The test procedure carrying the `[HandlerFunctions]` attribute. */
+  readonly testMethod: string;
+  /** Handler names listed in the attribute, trimmed, in source order. */
+  readonly handlerNames: ReadonlyArray<string>;
+  /** Source location of the test procedure declaration. */
+  readonly location: vscode.Location;
+}
+
 /** A discovered event subscriber. */
 export interface Subscriber {
   /** The procedure declaring `[EventSubscriber(...)]`. */

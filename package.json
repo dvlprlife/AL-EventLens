@@ -62,6 +62,7 @@
       { "command": "alEventLens.revealObject",      "title": "Reveal Object",             "category": "AL EventLens" },
       { "command": "alEventLens.revealSubscriber",  "title": "Reveal Subscriber",         "category": "AL EventLens" },
       { "command": "alEventLens.gotoSubscriber",    "title": "Go to Subscriber",          "category": "AL EventLens" },
+      { "command": "alEventLens.showHandlerUsages", "title": "Show Handler Usages",       "category": "AL EventLens" },
       { "command": "alEventLens.exportMermaid",     "title": "Export to Mermaid",         "category": "AL EventLens" }
     ],
     "configuration": {
@@ -96,6 +97,11 @@
           "type": "boolean",
           "default": true,
           "description": "Show a CodeLens above [IntegrationEvent] and [BusinessEvent] declarations with the live subscriber count."
+        },
+        "alEventLens.handlerCodeLens.enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show a CodeLens above test handler methods ([MessageHandler], [ConfirmHandler], [PageHandler], etc.) with the number of test methods that reference the handler in their [HandlerFunctions] attribute, or 'unused handler' when none do."
         }
       }
     }

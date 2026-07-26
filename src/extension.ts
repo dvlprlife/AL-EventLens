@@ -73,6 +73,25 @@ export function activate(context: vscode.ExtensionContext): void {
     const range = reviveRange(loc.range);
     void vscode.window.showTextDocument(uri, { selection: range });
   });
+  register('alEventLens.showHandlerUsages', (...args) => {
+    // Fired by the handler CodeLens with (handler location, usage locations).
+    // Hands off to VS Code's built-in references peek so handler usages get
+    // the same UI as any other "find references" result. Both arguments come
+    // straight from the provider in-process, so they are real vscode types —
+    // no revival needed (unlike `gotoSubscriber`, whose payload can arrive
+    // structured-cloned from the webview).
+    const at = args[0] as vscode.Location | undefined;
+    const usages = args[1] as vscode.Location[] | undefined;
+    if (!at || !usages || usages.length === 0) {
+      return;
+    }
+    void vscode.commands.executeCommand(
+      'editor.action.showReferences',
+      at.uri,
+      at.range.start,
+      usages
+    );
+  });
   register('alEventLens.exportMermaid',   (...args) => {
     const publisher = (args[0] as Publisher | undefined) ?? getSelectedPublisher();
     void runExportMermaid(publisher, store);
