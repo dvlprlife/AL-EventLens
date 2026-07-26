@@ -17,6 +17,15 @@ updates:
       include: "scope"
     labels:
       - "dependencies"
+    ignore:
+      # @types/vscode is pinned to engines.vscode on purpose — it declares the
+      # oldest VS Code we support, and typing against a newer API surface would
+      # let code compile that fails at runtime on that baseline. `vsce package`
+      # enforces this and hard-fails the Linux packaging smoke test:
+      #   "@types/vscode ^1.125.0 greater than engines.vscode ^1.85.0"
+      # so an unignored bump silently breaks every grouped dev-dep PR (it did,
+      # in #170/#171). Raise this only in lockstep with engines.vscode, by hand.
+      - dependency-name: "@types/vscode"
     groups:
       dev-dependencies:
         dependency-type: "development"
