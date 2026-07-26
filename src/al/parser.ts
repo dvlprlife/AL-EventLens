@@ -52,72 +52,186 @@ export function parseAl(
   text: string,
   appId?: string
 ): { publishers: Publisher[]; subscribers: Subscriber[] } {
-  const cleaned = stripComments(text);
+  const ctx = makeObjectContext(text, appId);
+  return ctx ? parseAlFrom(uri, ctx) : { publishers: [], subscribers: [] };
+}
 
-  const objects = findObjects(cleaned, appId);
-  if (objects.length === 0) {
-    return { publishers: [], subscribers: [] };
-  }
-
-  const ownerForLine = makeOwnerLookup(objects);
-
+/**
+ * `parseAl` against an already-built object context.
+ *
+ * Exported so a caller that runs several sweeps over the same document —
+ * `AlEventLensCodeLensProvider`, which needs both events and handlers — can
+ * build the context once and pay for `stripComments` / `findObjects` once,
+ * rather than once per parser entry point.
+ */
+export function parseAlFrom(
+  uri: vscode.Uri,
+  ctx: AlObjectContext
+): { publishers: Publisher[]; subscribers: Subscriber[] } {
   const publishers: Publisher[] = [];
-  for (const m of cleaned.matchAll(publisherAttrRe)) {
-    const attrEnd = (m.index ?? 0) + m[0].length;
-    const proc = findProcedureAfter(cleaned, attrEnd);
-    if (!proc) {
-      continue;
-    }
-    // The bounded procedure search (PROCEDURE_SEARCH_WINDOW) can reach into the
-    // NEXT object when an attribute is left dangling with no procedure beneath
-    // it (common mid-edit). `ownerForLine` returns the same ObjectRef instance
-    // for every line in one object, so an identity mismatch means the procedure
-    // crossed an object boundary — drop the match rather than bind a phantom
-    // publisher to the wrong object (issue #159).
-    const procOwner = ownerForLine(proc.line);
-    if (procOwner !== ownerForLine(absToLineCol(cleaned, m.index ?? 0).line)) {
-      continue;
-    }
+  for (const b of bindAttributes(ctx, publisherAttrRe)) {
     const kind: EventKind =
-      m[1].toLowerCase() === 'integrationevent' ? 'integration' : 'business';
+      b.match[1].toLowerCase() === 'integrationevent' ? 'integration' : 'business';
     publishers.push({
-      owner: procOwner,
-      eventName: stripQuotes(proc.name),
+      owner: b.owner,
+      eventName: stripQuotes(b.proc.name),
       kind,
-      location: new vscode.Location(uri, new vscode.Position(proc.line, proc.col)),
-      parameters: proc.parameters
+      location: new vscode.Location(uri, new vscode.Position(b.proc.line, b.proc.col)),
+      parameters: b.proc.parameters
     });
   }
 
   const subscribers: Subscriber[] = [];
-  for (const m of cleaned.matchAll(subscriberAttrRe)) {
-    const attrEnd = (m.index ?? 0) + m[0].length;
-    const proc = findProcedureAfter(cleaned, attrEnd);
-    if (!proc) {
-      continue;
-    }
+  for (const b of bindAttributes(ctx, subscriberAttrRe)) {
+    const m = b.match;
     const targetKind = objectKindFromString(m[1]);
     const targetName = m[2] ?? m[3] ?? m[4];
     const targetEvent = m[5] ?? m[6] ?? m[7];
     if (!targetKind || !targetName || !targetEvent) {
       continue;
     }
-    // Same cross-object guard as the publisher loop (issue #159): a dangling
-    // [EventSubscriber] must not bind to the next object's procedure.
-    const procOwner = ownerForLine(proc.line);
-    if (procOwner !== ownerForLine(absToLineCol(cleaned, m.index ?? 0).line)) {
-      continue;
-    }
     subscribers.push({
-      owner: procOwner,
+      owner: b.owner,
       target: { kind: targetKind, name: targetName },
       targetEvent,
-      location: new vscode.Location(uri, new vscode.Position(proc.line, proc.col)),
+      location: new vscode.Location(uri, new vscode.Position(b.proc.line, b.proc.col)),
       resolved: false
     });
   }
 
   return { publishers, subscribers };
+}
+
+/**
+ * The parsed skeleton of one AL file: its comment-stripped text, the line →
+ * owning `ObjectRef` lookup, and an offset → (line, col) mapper.
+ *
+ * Built once per file and shared across every attribute sweep over that file.
+ * `stripComments` and `findObjects` are both O(file), so re-deriving this per
+ * sweep would re-scan the whole file for each attribute kind.
+ */
+export interface AlObjectContext {
+  readonly cleaned: string;
+  readonly ownerForLine: (line: number) => ObjectRef;
+  /** Absolute offset into `cleaned` → its 0-based line and column. */
+  readonly lineColAt: (idx: number) => { line: number; col: number };
+}
+
+/** One attribute match bound to the procedure it decorates. */
+export interface AttributeBinding {
+  /** The attribute regex's match, for reading its capture groups. */
+  readonly match: RegExpMatchArray;
+  /** Object declaring the decorated procedure. */
+  readonly owner: ObjectRef;
+  /** The decorated procedure's name, position, and parameter list. */
+  readonly proc: ProcedureSite;
+}
+
+/**
+ * Build the shared skeleton for one AL file's **raw** source, or `undefined`
+ * when the file declares no AL object at all (nothing can be bound then).
+ *
+ * Comment stripping happens here rather than at the call site: every sweep
+ * must see exactly the same comment-stripped view, and a caller that passed
+ * raw text to a context that assumed stripped text would silently treat
+ * commented-out object headers as real declarations.
+ *
+ * Exported so other AL-domain modules (`handlers.ts`) can run their own
+ * attribute sweeps against exactly `parseAl`'s view of the file.
+ */
+export function makeObjectContext(
+  text: string,
+  appId?: string
+): AlObjectContext | undefined {
+  const cleaned = stripComments(text);
+  const objects = findObjects(cleaned, appId);
+  if (objects.length === 0) {
+    return undefined;
+  }
+  const lineStarts = computeLineStarts(cleaned);
+  return {
+    cleaned,
+    ownerForLine: makeOwnerLookup(objects),
+    lineColAt: (idx: number) => lineColFrom(lineStarts, idx)
+  };
+}
+
+/** Offsets at which each line of `text` begins. Index i → start of line i. */
+function computeLineStarts(text: string): number[] {
+  const starts = [0];
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') {
+      starts.push(i + 1);
+    }
+  }
+  return starts;
+}
+
+/**
+ * Map an absolute offset to (line, col) by binary-searching precomputed line
+ * starts — O(log lines) per lookup.
+ *
+ * The previous `absToLineCol` counted newlines from offset 0 on every call,
+ * which is O(offset). Called once per attribute match (and once more per
+ * bound procedure), that made a file with many attributes O(matches × length)
+ * overall — the same shape as the pathological scan bounded by
+ * `PROCEDURE_SEARCH_WINDOW` in issue #125, and it runs on the CodeLens path,
+ * i.e. on every edit and scroll of an open document.
+ */
+function lineColFrom(lineStarts: ReadonlyArray<number>, idx: number): { line: number; col: number } {
+  let lo = 0;
+  let hi = lineStarts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (lineStarts[mid] <= idx) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return { line: lo, col: idx - lineStarts[lo] };
+}
+
+/**
+ * Find every match of `attrRe` (which must be a global regex) and bind it to
+ * the procedure it decorates, dropping any match that fails to bind.
+ *
+ * A match is dropped when either:
+ * - no `procedure` keyword follows within `PROCEDURE_SEARCH_WINDOW`, or
+ * - that procedure lives in a *different* object than the attribute.
+ *
+ * The second case is the dangling-attribute guard (issue #159): the bounded
+ * procedure search can reach into the NEXT object when an attribute is left
+ * with no procedure beneath it, which is common mid-edit. `ownerForLine`
+ * returns the same `ObjectRef` instance for every line of one object, so an
+ * identity mismatch means the procedure crossed an object boundary — binding
+ * it would attribute a phantom publisher/subscriber/handler to the wrong
+ * object. Valid AL, where an attribute always decorates a procedure in its own
+ * object, is unaffected.
+ *
+ * Shared by `parseAl`'s publisher and subscriber sweeps and by
+ * `parseHandlers`, so the boundary rule has exactly one implementation.
+ *
+ * A generator, so a file with thousands of attributes streams one binding at
+ * a time instead of materializing every `RegExpMatchArray` (each of which
+ * retains a back-reference to the whole input) at once.
+ */
+export function* bindAttributes(
+  ctx: AlObjectContext,
+  attrRe: RegExp
+): Generator<AttributeBinding> {
+  for (const m of ctx.cleaned.matchAll(attrRe)) {
+    const attrStart = m.index ?? 0;
+    const proc = findProcedureAfter(ctx, attrStart + m[0].length);
+    if (!proc) {
+      continue;
+    }
+    const procOwner = ctx.ownerForLine(proc.line);
+    if (procOwner !== ctx.ownerForLine(ctx.lineColAt(attrStart).line)) {
+      continue;
+    }
+    yield { match: m, owner: procOwner, proc };
+  }
 }
 
 interface ObjectBoundary {
@@ -168,14 +282,16 @@ function makeOwnerLookup(objects: ReadonlyArray<ObjectBoundary>): (line: number)
   };
 }
 
-interface ProcedureSite {
+/** A procedure declaration site found beneath an attribute. */
+export interface ProcedureSite {
   readonly line: number;
   readonly col: number;
   readonly name: string;
   readonly parameters: ReadonlyArray<Parameter>;
 }
 
-function findProcedureAfter(text: string, fromIdx: number): ProcedureSite | undefined {
+function findProcedureAfter(ctx: AlObjectContext, fromIdx: number): ProcedureSite | undefined {
+  const text = ctx.cleaned;
   // Bound the keyword search to a fixed window so a procedure-less tail is
   // O(window) instead of O(remaining file) — see PROCEDURE_SEARCH_WINDOW.
   // The parameter list below is still read against the full `text`, so a
@@ -195,7 +311,7 @@ function findProcedureAfter(text: string, fromIdx: number): ProcedureSite | unde
     ? procKwIdx + 'procedure'.length + wsLen
     : 0;
   const nameAbs = absMatchStart + nameStartInMatch;
-  const { line, col } = absToLineCol(text, nameAbs);
+  const { line, col } = ctx.lineColAt(nameAbs);
 
   // Locate the parameter list `(...)` immediately after the procedure name
   // and parse it. The name regex matched a single token, so the open paren
@@ -321,18 +437,6 @@ function parseOneParameter(raw: string): Parameter | undefined {
   return { name: stripQuotes(nameRaw), typeText, isVar };
 }
 
-function absToLineCol(text: string, idx: number): { line: number; col: number } {
-  let line = 0;
-  let lineStart = 0;
-  for (let i = 0; i < idx && i < text.length; i++) {
-    if (text[i] === '\n') {
-      line++;
-      lineStart = i + 1;
-    }
-  }
-  return { line, col: idx - lineStart };
-}
-
 function objectKindFromString(s: string): ObjectKind | undefined {
   const lower = s.toLowerCase();
   return (OBJECT_KINDS as ReadonlyArray<string>).includes(lower)
@@ -340,7 +444,15 @@ function objectKindFromString(s: string): ObjectKind | undefined {
     : undefined;
 }
 
-function stripQuotes(s: string): string {
+/**
+ * Unwrap an AL quoted identifier or string literal — `"Weird Name"` and
+ * `'Weird Name'` both yield `Weird Name`.
+ *
+ * Exported so `handlers.ts` unwraps procedure names through this one
+ * implementation; a second copy would drift the moment AL identifier
+ * unwrapping needs a fix (e.g. doubled-quote escapes).
+ */
+export function stripQuotes(s: string): string {
   if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
     return s.slice(1, -1);
   }
