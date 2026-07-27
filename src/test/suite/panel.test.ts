@@ -886,6 +886,10 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
     // and crash with `Cannot read properties of undefined (reading 'line')`.
     // Now the panel host just forwards whatever shape it received and the
     // command itself revives via reviveRange — the dispatch must succeed.
+    // (Fixture is the hybrid outer-slots/inner-public-names shape; genuine
+    // structuredClone nests `_line`/`_character` too. Revival of both lives
+    // in reviveLocation.test.ts — this test only proves the panel forwards
+    // whatever shape it received.)
     patchCreate();
     patchExecute();
     const store = new EventIndexStore();
