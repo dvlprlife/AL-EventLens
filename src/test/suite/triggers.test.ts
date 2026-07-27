@@ -156,3 +156,38 @@ suite('al/triggers: collectTriggerOwners appId case-insensitivity (#130)', () =>
       'different appIds must remain separate owners (scoping preserved)');
   });
 });
+
+suite('al/triggers: collectTriggerOwners and preprocessor directives (#182)', () => {
+  test("an apostrophe in #region text does not drop a table header below it", () => {
+    // collectTriggerOwners is the second consumer of stripComments, so the
+    // corrupted scanner state dropped trigger owners the same way it dropped
+    // publishers: the `Don't` apostrophe opened a phantom string that the Label
+    // literal's quote closed, turning the literal's `/*` into a real block
+    // comment that blanked everything after it — the table header included.
+    const src = [
+      'codeunit 50100 "Helper"',
+      '{',
+      "    #region Don't break",
+      '    #endregion',
+      "    var L: Label 'x /* y';",
+      '}',
+      '',
+      'table 50101 "Cust Thing"',
+      '{',
+      '    fields',
+      '    {',
+      '        field(1; Name; Text[50]) { }',
+      '    }',
+      '}'
+    ].join('\n');
+    const out = new Map<string, ObjectRef>();
+    collectTriggerOwners(src, out);
+    assert.strictEqual(out.size, 1, 'the table below the directive must still be collected');
+    const owner = [...out.values()][0];
+    assert.strictEqual(owner.kind, 'table');
+    assert.strictEqual(owner.name, 'Cust Thing');
+    assert.strictEqual(owner.id, 50101);
+    assert.strictEqual(synthesizeTriggerPublishers(owner).length, 10,
+      'the collected owner must still synthesize its trigger publishers');
+  });
+});

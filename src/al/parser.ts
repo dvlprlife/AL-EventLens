@@ -467,24 +467,56 @@ export function stripQuotes(s: string): string {
  * indexer's trigger-owner collection) match `parseAl`'s view of the file —
  * commented-out object headers must not be treated as real declarations.
  *
- * Implemented as a single forward character scan with four exclusive states
- * (single-quote string, double-quote quoted identifier, line comment, block
- * comment). A `//` or `/*` is only a comment opener while in code state, so
- * comment delimiters that appear *inside* an AL string literal (`'…'`) or
- * quoted identifier (`"…"`) are left verbatim rather than blanking real code.
- * AL's doubled-quote escapes (`''` inside `'…'`, `""` inside `"…"`) are
- * honored so an escaped quote doesn't prematurely close the span. The result
- * is the same length as the input: only non-newline comment content is blanked
- * to `' '`; every `\n`/`\r` is preserved, so all downstream line/column and
- * byte offsets are unchanged.
+ * Implemented as a single forward character scan with five exclusive states
+ * (preprocessor directive, single-quote string, double-quote quoted identifier,
+ * line comment, block comment). A `//` or `/*` is only a comment opener while
+ * in code state, so comment delimiters that appear *inside* an AL string
+ * literal (`'…'`) or quoted identifier (`"…"`) are left verbatim rather than
+ * blanking real code. AL's doubled-quote escapes (`''` inside `'…'`, `""`
+ * inside `"…"`) are honored so an escaped quote doesn't prematurely close the
+ * span. The result is the same length as the input: only non-newline comment
+ * content is blanked to `' '`; every `\n`/`\r` is preserved, so all downstream
+ * line/column and byte offsets are unchanged.
+ *
+ * A line whose first non-whitespace character is `#` is a **preprocessor
+ * directive** (`#region` / `#endregion` / `#pragma`) and its text runs to
+ * end-of-line as free text, not code. Directive text may legally contain any
+ * delimiter — `#region Customer's balance` is ordinary BC code — so nothing in
+ * it may open a string or comment state; letting the apostrophe there open a
+ * phantom string inverts every subsequent boundary in the file and silently
+ * both drops real events and fabricates ones from commented-out code (#182).
+ * The rule is per *line*, not per region: a `//`-commented object header
+ * between `#region` and `#endregion` is still blanked like any other comment.
  */
 export function stripComments(text: string): string {
   const out = text.split('');
   const n = text.length;
   let i = 0;
+  // True while nothing but whitespace has been seen since the last `\n`. Kept
+  // as a running flag, updated by each branch below, rather than scanning
+  // backwards over leading whitespace per `#`: a backwards scan is O(indent)
+  // per character and reintroduces the quadratic shape #125 removed.
+  let atLineStart = true;
   while (i < n) {
     const ch = text[i];
-    // 1. Single-quote string: spans lines; only a lone `'` closes it.
+    // 1. Preprocessor directive: `#region` / `#endregion` / `#pragma`.
+    //    Directive text is free text, not code — copy it through verbatim to
+    //    end of line so nothing in it (`'`, `"`, `//`, `/*`) opens a scanner
+    //    state. Verbatim rather than blanked: `findObjects`' header regex is
+    //    anchored at `^\s*(kind)` and can't match a directive line anyway, and
+    //    copying preserves length/`\r`/`\n` for downstream offsets. Note the
+    //    surviving text is still swept by the attribute regexes, so
+    //    `#region [IntegrationEvent] helpers` can still bind a phantom — that
+    //    is the line-anchor bug class tracked by #179, not this one.
+    if (atLineStart && ch === '#') {
+      while (i < n && text[i] !== '\n') {
+        out[i] = text[i];
+        i++;
+      }
+      atLineStart = false;
+      continue;
+    }
+    // 2. Single-quote string: spans lines; only a lone `'` closes it.
     if (ch === "'") {
       out[i] = ch;
       i++;
@@ -504,9 +536,10 @@ export function stripComments(text: string): string {
         out[i] = text[i];
         i++;
       }
+      atLineStart = false;
       continue;
     }
-    // 2. Double-quote quoted identifier: same shape as (1) with `"`.
+    // 3. Double-quote quoted identifier: same shape as (2) with `"`.
     if (ch === '"') {
       out[i] = ch;
       i++;
@@ -525,9 +558,10 @@ export function stripComments(text: string): string {
         out[i] = text[i];
         i++;
       }
+      atLineStart = false;
       continue;
     }
-    // 3. Line comment: blank through to (but not including) the newline.
+    // 4. Line comment: blank through to (but not including) the newline.
     if (ch === '/' && text[i + 1] === '/') {
       out[i] = ' ';
       out[i + 1] = ' ';
@@ -536,9 +570,12 @@ export function stripComments(text: string): string {
         out[i] = text[i] === '\r' ? '\r' : ' ';
         i++;
       }
+      // Halts *before* the `\n`; the code branch consumes it and re-arms the
+      // line-start flag on the next iteration.
+      atLineStart = false;
       continue;
     }
-    // 4. Block comment: blank through the first real `*/`; preserve newlines.
+    // 5. Block comment: blank through the first real `*/`; preserve newlines.
     if (ch === '/' && text[i + 1] === '*') {
       out[i] = ' ';
       out[i + 1] = ' ';
@@ -553,10 +590,18 @@ export function stripComments(text: string): string {
         out[i] = text[i] === '\n' || text[i] === '\r' ? text[i] : ' ';
         i++;
       }
+      atLineStart = false;
       continue;
     }
-    // 5. Code: copy through verbatim.
+    // 6. Code: copy through verbatim.
     out[i] = ch;
+    if (ch === '\n') {
+      atLineStart = true;
+    } else if (ch !== ' ' && ch !== '\t' && ch !== '\r') {
+      // `\r` is neutral, not a line ending: for CRLF the following `\n` arms
+      // the flag, matching the `\r?\n` terminator the rest of the parser uses.
+      atLineStart = false;
+    }
     i++;
   }
   return out.join('');
