@@ -151,4 +151,23 @@ suite('extension: alEventLens.gotoSubscriber command body', () => {
     assert.strictEqual(shown[0].selection!.start.line, 0);
     assert.strictEqual(shown[0].selection!.end.line, 0);
   });
+
+  test('REGRESSION: array range shape (Range.toJSON) opens at the subscriber, not line 1 (#185)', async () => {
+    // The shape a real panel click delivers: JSON.stringify over the webview
+    // boundary turns Location.range into [start, end]. Pre-fix this revived to
+    // Range(0,0,0,0) and the editor opened at line 1 on every panel jump.
+    patchWindow();
+    const clonedLocation = {
+      uri: { scheme: 'file', authority: '', path: '/workspace/ArrayShape.al', query: '', fragment: '' },
+      range: [{ line: 42, character: 4 }, { line: 42, character: 9 }]
+    };
+    await vscode.commands.executeCommand('alEventLens.gotoSubscriber', clonedLocation);
+    assert.strictEqual(shown.length, 1, 'showTextDocument must fire exactly once');
+    assert.strictEqual(shown[0].uri.path, '/workspace/ArrayShape.al');
+    assert.ok(shown[0].selection instanceof vscode.Range);
+    assert.strictEqual(shown[0].selection!.start.line, 42);
+    assert.strictEqual(shown[0].selection!.start.character, 4);
+    assert.strictEqual(shown[0].selection!.end.line, 42);
+    assert.strictEqual(shown[0].selection!.end.character, 9);
+  });
 });

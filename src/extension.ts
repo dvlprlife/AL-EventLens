@@ -62,8 +62,9 @@ export function activate(context: vscode.ExtensionContext): void {
       );
       return;
     }
-    // `reviveRange` tolerates {start,end} OR {_start,_end} OR a degenerate
-    // empty object — webview-postMessage strips Range's class getters.
+    // `reviveRange` handles the array shape `Range.toJSON()` actually produces,
+    // plus {start,end}, {_start,_end}, and a degenerate empty object — the
+    // webview hop serializes with JSON.stringify, not structured clone (#185).
     const range = reviveRange(loc.range);
     void vscode.window.showTextDocument(uri, { selection: range });
   });
