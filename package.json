@@ -65,6 +65,15 @@
       { "command": "alEventLens.showHandlerUsages", "title": "Show Handler Usages",       "category": "AL EventLens" },
       { "command": "alEventLens.exportMermaid",     "title": "Export to Mermaid",         "category": "AL EventLens" }
     ],
+    "menus": {
+      "commandPalette": [
+        { "command": "alEventLens.revealPublisher",   "when": "false" },
+        { "command": "alEventLens.revealObject",      "when": "false" },
+        { "command": "alEventLens.revealSubscriber",  "when": "false" },
+        { "command": "alEventLens.gotoSubscriber",    "when": "false" },
+        { "command": "alEventLens.showHandlerUsages", "when": "false" }
+      ]
+    },
     "configuration": {
       "title": "AL EventLens",
       "properties": {

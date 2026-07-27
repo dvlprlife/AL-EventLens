@@ -37,14 +37,14 @@ AL EventLens indexes `[IntegrationEvent]`, `[BusinessEvent]`, and `[EventSubscri
 | --- | --- |
 | `AL EventLens: Open Panel` | Open the searchable publisher/subscriber webview panel. |
 | `AL EventLens: Refresh Index` | Force a full re-index of the workspace and `.alpackages` dependencies. |
-| `AL EventLens: Reveal Publisher` | Open the panel scoped to the publisher under the cursor (also fired by CodeLens). |
+| `AL EventLens: Reveal Publisher` | Open the panel scoped to a single publisher (fired by the event CodeLens and by clicking an event row in the activity-bar tree). |
 | `AL EventLens: Reveal Object` | Open the panel and filter the publisher list to a specific AL object (fired by clicking an object row in the activity-bar tree). |
 | `AL EventLens: Reveal Subscriber` | Open the panel in Subscribers mode focused on a subscriber (fired by clicking a row in the Subscribers view). |
-| `AL EventLens: Go to Subscriber` | Jump to the source location of a subscriber selected in the panel. |
+| `AL EventLens: Go to Subscriber` | Jump to the source location of a subscriber (fired by clicking a subscriber row in the panel). |
 | `AL EventLens: Show Handler Usages` | Peek the test methods that reference a handler method (fired by the handler CodeLens). |
 | `AL EventLens: Export to Mermaid` | Copy a Mermaid diagram of the current publisher's subscribers to the clipboard. |
 
-All commands are available through the Command Palette (search for "AL EventLens") and through the activity-bar view.
+`Open Panel`, `Refresh Index`, and `Export to Mermaid` are available through the Command Palette (search for "AL EventLens"). The rest take an argument and are fired by the surface that supplies it — CodeLens, the activity-bar views, and the panel — so they are hidden from the palette rather than listed there doing nothing.
 
 ## Settings
 
