@@ -864,10 +864,16 @@ suite('index/reindex: save-supersession re-issue (issue #181)', () => {
     }
   });
 
-  test('the superseded log names its cause: a file save (re-indexing) vs a newer run (discarding)', async () => {
+  test('the superseded log names its consequence: re-indexing vs discarding', async () => {
     // Issue #181's second half: the old line read "initial build
     // superseded - using newer index" in BOTH cases, which was actively
     // misleading — on the save path no newer index existed at all.
+    //
+    // The line names the CONSEQUENCE, not the cause. It said "a file save"
+    // until #195 gave `reissued: true` a second cause (a superseding run
+    // that failed), which would have made that wording newly false — the
+    // same defect #181 was filed about. The assertions below are unchanged;
+    // only this title and the wording under test moved to be cause-neutral.
     patchConfig({});
     patchDiscoverApps(async () => []);
     const originalConsoleLog = console.log;

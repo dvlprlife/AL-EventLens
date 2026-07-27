@@ -312,9 +312,24 @@ export function runIndexAndCommit(
     (index): RunIndexResult => {
       if (generation === latestStartedGeneration) {
         store.set(index);
-        latestCommittedRunSeq = runSeq;
-        // A committed full scan IS the rebuild anyone was owed.
-        rebuildOwed = false;
+        if (runSeq <= latestRunSeq) {
+          // Same post-reset guard the reject path applies, for the same
+          // reason. `resetExtensionStateForReload` zeroes both counters, so
+          // a long-lived pre-reset run can later alias a *new* session's
+          // generation and land here; its `runSeq` belongs to the previous
+          // activation and is typically far larger. Writing it would leave
+          // `latestCommittedRunSeq` above every seq the new session will
+          // issue, permanently suppressing the `latestCommittedRunSeq <=
+          // runSeq` branch below and with it the #195 debt handoff.
+          //
+          // `store.set` above is deliberately NOT guarded: a stale run
+          // committing on generation aliasing is pre-existing behaviour,
+          // out of this issue's scope, and changing it here would alter
+          // the last-started-wins contract.
+          latestCommittedRunSeq = runSeq;
+          // A committed full scan IS the rebuild anyone was owed.
+          rebuildOwed = false;
+        }
         return { index, committed: true, reissued: false };
       }
       // Superseded. Everything below is bookkeeping for who, if anyone,
