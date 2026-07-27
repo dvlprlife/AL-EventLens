@@ -346,9 +346,15 @@ suite('index/folderWatcher: registerWorkspaceFolderReindex', () => {
     // rebuild superseded by a *Refresh* still re-issued — a redundant
     // duplicate full scan whose result the Refresh immediately overwrote.
     // The shared `latestRunSeq` sees the Refresh as a newer full run, so
-    // the rebuild stands down. The committed end state is identical (the
+    // the rebuild stands down.
+    //
+    // When the superseding run COMMITS — which is what this test sets up —
+    // the end state is identical and only the wasted scan is gone: the
     // superseding run reads `workspaceFolders` at call time, so it
-    // includes the new folder); only the wasted scan is gone.
+    // includes the newly-added folder. That equivalence does NOT hold if
+    // the superseding run rejects; the rebuild is then dropped and nothing
+    // replaces it. See the KNOWN GAP note in `reindex.ts` — that case is
+    // tracked separately, not asserted here.
     patchOnDidChange();
     const store = new EventIndexStore();
     try {

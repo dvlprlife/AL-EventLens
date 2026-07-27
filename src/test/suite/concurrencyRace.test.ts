@@ -454,8 +454,9 @@ suite('index/reindex: generation-guard regression fixes', () => {
 
   test('initial fails AFTER an overlapping refresh ALSO fails: store still initialized (defect 1)', async () => {
     // Defect 1 (issue #113): post-#104, the activation gate used
-    // `isLatestGeneration`, so a refresh that overlapped the initial
-    // pass took ownership of the latest generation — and when the
+    // `isLatestGeneration` (a helper since removed as dead code), so a
+    // refresh that overlapped the initial pass took ownership of the
+    // latest generation — and when the
     // refresh later FAILED (only logged, no fallback), the initial's
     // failure handler ALSO refused to install the empty fallback
     // because its generation was no longer "latest". Result: store
@@ -920,6 +921,131 @@ suite('index/reindex: save-supersession re-issue (issue #181)', () => {
         writable: true,
         value: originalConsoleLog
       });
+      store.dispose();
+    }
+  });
+
+  test('a parser bug in the RE-ISSUED run still raises the toast (the re-issue is detached, so no caller catch covers it)', async () => {
+    // The re-issued run is fire-and-forget: `done` resolves with the
+    // ORIGINAL run's result, so `runInitialIndex`'s own catch never sees
+    // the replacement's rejection. Without routing it through the shared
+    // `surfaceParserBug`, a `[AL EventLens parser bug]` landing on the
+    // re-issue instead of the original would be console-only and the user
+    // would never learn the index failed.
+    patchConfig({});
+    patchDiscoverApps(async () => []);
+    const errors: string[] = [];
+    const toasts: string[] = [];
+    const originalConsoleError = console.error;
+    Object.defineProperty(console, 'error', {
+      configurable: true,
+      writable: true,
+      value: (...args: unknown[]): void => { errors.push(args.map((a) => String(a)).join(' ')); }
+    });
+    const originalShowError = vscode.window.showErrorMessage;
+    Object.defineProperty(vscode.window, 'showErrorMessage', {
+      configurable: true,
+      value: (text: string): Thenable<string | undefined> => {
+        toasts.push(text);
+        return Promise.resolve(undefined);
+      }
+    });
+    const store = new EventIndexStore();
+    try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      const indexFn = (): Promise<EventIndex> => {
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      const initial = runInitialIndex(fakeContext(), store, indexFn);
+      await flush();
+
+      // A save supersedes the activation pass, arming the re-issue.
+      await handleSave(fakeDoc(vscode.Uri.parse('file:///workspace/ToastA.al'), AL_A), store);
+      deferreds[0].resolve(makeIndex('discarded'));
+      await initial;
+      await flush();
+      assert.strictEqual(deferreds.length, 2, 'the supersession must have re-issued one run');
+      assert.strictEqual(toasts.length, 0,
+        'no toast yet — the original run succeeded, it was only superseded');
+
+      // The RE-ISSUED run is the one that hits the parser bug.
+      deferreds[1].reject(new Error('[AL EventLens parser bug] boom (in Broken.al)'));
+      await flush();
+
+      assert.strictEqual(toasts.length, 1,
+        `the re-issued run's parser bug must raise exactly one toast; got ${JSON.stringify(toasts)}`);
+      assert.ok(toasts[0].includes('parser bug') && toasts[0].includes('file an issue'),
+        `the toast must be the file-an-issue parser-bug message; got ${JSON.stringify(toasts)}`);
+      assert.ok(errors.some((e) => e.includes('re-issued index run failed')),
+        `the rejection must still be logged; got ${JSON.stringify(errors)}`);
+    } finally {
+      Object.defineProperty(vscode.window, 'showErrorMessage', {
+        configurable: true,
+        value: originalShowError
+      });
+      Object.defineProperty(console, 'error', {
+        configurable: true,
+        writable: true,
+        value: originalConsoleError
+      });
+      store.dispose();
+    }
+  });
+
+  test('CHARACTERIZATION: a run superseded by a newer full run that then FAILS is dropped, not re-issued', async () => {
+    // Not an assertion that this is desirable — it documents the KNOWN GAP
+    // recorded at the `runSeq === latestRunSeq` check in `reindex.ts`, so
+    // the gap is verifiable rather than a comment claim, and so whoever
+    // closes it has to come here and flip this deliberately.
+    //
+    // The stand-down tests only for the EXISTENCE of a newer full run,
+    // never for its outcome. When that newer run rejects it commits
+    // nothing, and the superseded run has already thrown its own scan
+    // away: neither result reaches the store. Tracked as its own issue —
+    // narrowing the guard means making the counter record completion
+    // rather than entry, which is a real concurrency change, and this
+    // module's concurrency changes have a history (#113/#119).
+    patchConfig({});
+    patchDiscoverApps(async () => []);
+    const store = new EventIndexStore();
+    try {
+      let calls = 0;
+      const dFirst = deferred<EventIndex>();
+      const dNewer = deferred<EventIndex>();
+
+      // Run A opts into recovery (as all three production callers do).
+      const first = runIndexAndCommit(
+        fakeContext(), store, () => { calls++; return dFirst.promise; },
+        { reissueIfSuperseded: true }
+      );
+      // Run B is a newer full run — it bumps BOTH counters past A.
+      const newer = runIndexAndCommit(
+        fakeContext(), store, () => { calls++; return dNewer.promise; }
+      );
+      await flush();
+      assert.strictEqual(calls, 2, 'both runs started');
+
+      // B fails. Nothing commits from it.
+      dNewer.reject(new Error('synthetic buildIndex failure'));
+      await assert.rejects(newer.done, /synthetic buildIndex failure/);
+
+      // A now resolves and finds itself superseded by B.
+      dFirst.resolve(makeIndex('discarded-by-a-run-that-failed'));
+      const firstResult = await first.done;
+      await flush();
+
+      assert.strictEqual(firstResult.committed, false,
+        'the superseded run does not commit');
+      assert.strictEqual(firstResult.reissued, false,
+        'current behaviour: it stands down rather than re-issuing, because a newer full run EXISTED — regardless of that run having failed');
+      assert.strictEqual(calls, 2,
+        'current behaviour: no third run is started, so nothing rebuilds the discarded scan');
+      assert.strictEqual(store.isInitialized, false,
+        'neither run reached the store');
+    } finally {
       store.dispose();
     }
   });

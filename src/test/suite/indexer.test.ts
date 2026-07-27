@@ -1969,8 +1969,9 @@ suite('index/indexer: buildIndex', () => {
       }
       // Post #119: the per-file worker now wraps the original parser
       // exception in a new Error whose message carries the
-      // `[AL EventLens parser bug]` marker prefix (`extension.ts`
-      // matches on this to surface a `showErrorMessage` toast). The
+      // `[AL EventLens parser bug]` marker prefix (`surfaceParserBug`
+      // in `reindex.ts` matches on this to raise a `showErrorMessage`
+      // toast). The
       // original exception rides along on `.cause`.
       assert.ok(caught instanceof Error,
         'buildIndex must reject with an Error so the extension-level .catch surfaces it');
