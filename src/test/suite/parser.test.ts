@@ -988,3 +988,135 @@ suite('al/parser: preprocessor directives (#182)', () => {
     assert.strictEqual(publishers[0].eventName, 'OnAfterBaz');
   });
 });
+
+suite('al/parser: attribute inside a string literal (#179)', () => {
+  // `stripComments` copies AL string literals through verbatim by design, so an
+  // attribute name written inside one survives into the text the attribute
+  // regexes sweep and used to bind forward to the *next* `procedure` keyword.
+  // `bindAttributes` now requires the last non-whitespace character before a
+  // match, on its own line, to be either nothing or a closing `]`.
+
+  test('an [IntegrationEvent] inside a string does not create a publisher', () => {
+    // Pre-fix this yielded publishers ["Next"] — the match sits inside
+    // `Unrelated`'s body, so the forward search binds the *following* procedure
+    // and #159's cross-object guard can't see it: both live in one object.
+    const src = [
+      'codeunit 50101 "P"',
+      '{',
+      '    procedure Unrelated()',
+      '    begin',
+      "        Error('use [IntegrationEvent] here');",
+      '    end;',
+      '',
+      '    procedure Next()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 0,
+      'an attribute named inside a string literal is not a decorator');
+  });
+
+  test('an [EventSubscriber] inside a string does not create a subscriber', () => {
+    // No single quotes inside the embedded attribute: `''` is AL's escape for a
+    // quote inside a string, and using it would make the fixture's own quoting,
+    // rather than the line anchor, the thing under test.
+    const src = [
+      'codeunit 50102 "S"',
+      '{',
+      '    procedure Unrelated()',
+      '    begin',
+      "        Error('use [EventSubscriber(ObjectType::Codeunit, Codeunit::\"Sales-Post\", OnAfterPostSalesDoc, false, false)] here');",
+      '    end;',
+      '',
+      '    procedure Next()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 0,
+      'a subscriber attribute named inside a string literal is not a decorator');
+  });
+
+  test('a real attribute in the same file still binds', () => {
+    // Proves the gate narrowed the sweep rather than disabling it: pre-fix this
+    // produced two publishers, both on `OnRealEvent`.
+    const src = [
+      'codeunit 50103 "M"',
+      '{',
+      '    procedure Unrelated()',
+      '    begin',
+      "        Error('use [IntegrationEvent] here');",
+      '    end;',
+      '',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnRealEvent()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnRealEvent');
+    assert.strictEqual(publishers[0].owner.name, 'M');
+  });
+
+  test('stacked attributes on one line still bind', () => {
+    // The rule is "last non-whitespace character is nothing or `]`", not
+    // "everything before the match is whitespace or `]`" — the prefix here is
+    // `[Scope('OnPrem')] `, which contains letters, parens, and quotes.
+    const src = [
+      'codeunit 50104 "Q"',
+      '{',
+      "    [Scope('OnPrem')] [IntegrationEvent(false, false)]",
+      '    procedure OnAfterFoo()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnAfterFoo');
+  });
+
+  test('an attribute at column 0 still binds', () => {
+    // Every other fixture indents; this covers the zero-whitespace half of
+    // "with or without leading whitespace".
+    const src = [
+      'codeunit 50105 "Z"',
+      '{',
+      '[IntegrationEvent(false, false)]',
+      'procedure OnAtColumnZero()',
+      'begin',
+      'end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnAtColumnZero');
+  });
+
+  test('an attribute in #region directive text does not bind', () => {
+    // Closes the residual #182 documented and deliberately scoped out: directive
+    // text is copied through verbatim, so the attribute reaches the sweep — the
+    // last non-whitespace character before it is `n`, from `#region`.
+    const src = [
+      'codeunit 50106 "R"',
+      '{',
+      '    #region [IntegrationEvent] helpers',
+      '    procedure Helper()',
+      '    begin',
+      '    end;',
+      '    #endregion',
+      '}'
+    ].join('\n');
+    const cleaned = stripComments(src);
+    assert.ok(cleaned.includes('#region [IntegrationEvent] helpers'),
+      'directive text is still copied through verbatim (#182)');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 0,
+      'directive text is free text, not a decorator');
+  });
+});

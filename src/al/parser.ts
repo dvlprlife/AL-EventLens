@@ -196,11 +196,21 @@ function lineColFrom(lineStarts: ReadonlyArray<number>, idx: number): { line: nu
  * Find every match of `attrRe` (which must be a global regex) and bind it to
  * the procedure it decorates, dropping any match that fails to bind.
  *
- * A match is dropped when either:
+ * A match is dropped when any of:
+ * - it is not anchored to the start of its line (see `isAttributeAnchored`), or
  * - no `procedure` keyword follows within `PROCEDURE_SEARCH_WINDOW`, or
  * - that procedure lives in a *different* object than the attribute.
  *
- * The second case is the dangling-attribute guard (issue #159): the bounded
+ * The first case is the string-literal guard (issue #179): `stripComments`
+ * copies AL string literals through verbatim by design — the handler sweep
+ * reads its `'A,B'` name list out of one — so an attribute name written inside
+ * a string (`Error('Missing [MessageHandler] attribute')`) survives into the
+ * text these regexes sweep and would otherwise bind forward to the *next*
+ * `procedure` keyword, fabricating a publisher/subscriber/handler on a
+ * procedure that declares nothing of the sort. The object-boundary rule below
+ * doesn't catch it, since both procedures usually live in the same object.
+ *
+ * The third case is the dangling-attribute guard (issue #159): the bounded
  * procedure search can reach into the NEXT object when an attribute is left
  * with no procedure beneath it, which is common mid-edit. `ownerForLine`
  * returns the same `ObjectRef` instance for every line of one object, so an
@@ -210,7 +220,7 @@ function lineColFrom(lineStarts: ReadonlyArray<number>, idx: number): { line: nu
  * object, is unaffected.
  *
  * Shared by `parseAl`'s publisher and subscriber sweeps and by
- * `parseHandlers`, so the boundary rule has exactly one implementation.
+ * `parseHandlers`, so both rules have exactly one implementation.
  *
  * A generator, so a file with thousands of attributes streams one binding at
  * a time instead of materializing every `RegExpMatchArray` (each of which
@@ -222,16 +232,52 @@ export function* bindAttributes(
 ): Generator<AttributeBinding> {
   for (const m of ctx.cleaned.matchAll(attrRe)) {
     const attrStart = m.index ?? 0;
+    const at = ctx.lineColAt(attrStart);
+    if (!isAttributeAnchored(ctx, attrStart, at.col)) {
+      continue;
+    }
     const proc = findProcedureAfter(ctx, attrStart + m[0].length);
     if (!proc) {
       continue;
     }
     const procOwner = ctx.ownerForLine(proc.line);
-    if (procOwner !== ctx.ownerForLine(ctx.lineColAt(attrStart).line)) {
+    if (procOwner !== ctx.ownerForLine(at.line)) {
       continue;
     }
     yield { match: m, owner: procOwner, proc };
   }
+}
+
+/**
+ * True when an attribute match starting at `attrStart` (column `col` on its
+ * line) is a decorator rather than text that merely *looks* like one.
+ *
+ * The rule: the last non-whitespace character before the match, on the match's
+ * own line, must be either nothing (the attribute is the first token on the
+ * line) or `]` (it follows another complete attribute, as in the stacked
+ * same-line form `[Test] [HandlerFunctions('X')]`). Anything else means the
+ * match sits inside an expression — overwhelmingly a string literal — and is
+ * not a decorator.
+ *
+ * Read against `ctx.cleaned`, not the raw text: comment content is already
+ * blanked to spaces there, so a block comment closed earlier on the same line
+ * as an attribute is transparent to the gate and the attribute still binds,
+ * which is the behavior we want.
+ *
+ * `attrStart - col` is the line-start offset — `lineColAt` already returns
+ * `col` as the offset from the start of the line — so no extra field on
+ * `AlObjectContext` is needed.
+ *
+ * Deliberately a line anchor rather than a string-span lexer, which leaves two
+ * known residual gaps, both far narrower than the bug this closes:
+ * - a string literal spanning lines whose *continuation* line starts with an
+ *   attribute still binds;
+ * - a string whose text immediately before the attribute happens to end in `]`
+ *   (`Error('foo] [IntegrationEvent]')`) still binds.
+ */
+function isAttributeAnchored(ctx: AlObjectContext, attrStart: number, col: number): boolean {
+  const prefix = ctx.cleaned.slice(attrStart - col, attrStart).trimEnd();
+  return prefix.length === 0 || prefix.endsWith(']');
 }
 
 interface ObjectBoundary {
@@ -490,6 +536,12 @@ export function stripQuotes(s: string): string {
  * other, so nothing inside it reaches the attribute regexes. The rule is per
  * *line*, not per region: a `//`-commented object header between `#region` and
  * `#endregion` is still blanked like any other comment.
+ *
+ * String literals, and the directive text before any comment delimiter, do
+ * survive verbatim — so an attribute name written inside one still reaches the
+ * attribute regexes intact. `bindAttributes`' line anchor (`isAttributeAnchored`,
+ * #179) — not this function — is what stops such a match from binding to a
+ * procedure.
  */
 export function stripComments(text: string): string {
   const out = text.split('');
@@ -519,10 +571,10 @@ export function stripComments(text: string): string {
     //    per line, not per region. A lone `/` is just directive text.
     //
     //    What #182 requires verbatim is the directive text itself (`#region
-    //    Don't break`), which stays untouched up to any comment delimiter. The
-    //    text before the delimiter is still swept by the attribute regexes, so
-    //    `#region [IntegrationEvent] helpers` can still bind a phantom — that
-    //    is the line-anchor bug class tracked by #179, not this one.
+    //    Don't break`), which stays untouched up to any comment delimiter. That
+    //    text is still swept by the attribute regexes, so
+    //    `#region [IntegrationEvent] helpers` reaches them — `bindAttributes`'
+    //    line anchor (`isAttributeAnchored`, #179) is what rejects it.
     if (atLineStart && ch === '#') {
       let inComment = false;
       while (i < n && text[i] !== '\n') {
