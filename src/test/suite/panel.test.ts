@@ -661,9 +661,17 @@ suite('ui/panelHtml: renderPanelHtml', () => {
   test('displayPathOf derives a native-looking path from uri.path alone, honoring the al-eventlens-app: guard (issue #183)', () => {
     // Keys are now `uri.path`-only, so display can no longer read `fsPath`
     // either — it is present in only some payloads. `displayPathOf` reproduces
-    // what `Uri.fsPath` would have shown for the one case where the two differ
-    // (a Windows drive-letter path on a `file:` URI), deterministically, so the
-    // panel's path column stops flipping between the two forms.
+    // what `Uri.fsPath` would have shown, deterministically, so the panel's
+    // path column stops flipping between the two forms.
+    //
+    // `uriToFsPath` has TWO branches that diverge from `uri.path`: the `file:`
+    // drive-letter path, covered here, and the authority-bearing `file:` URI
+    // (UNC), covered by the test below. Every fixture is a HAND-WRITTEN
+    // literal, never derived from a real `vscode.Uri` — `fsPath === path`
+    // byte-for-byte on Linux and macOS (the separator rewrite is
+    // `isWindows`-gated), so a derived fixture would pass against buggy code on
+    // two of the three CI legs. Same reasoning as
+    // subscriberTreeView.test.ts:181-184.
     const displayPathOf = new Function(
       'loc',
       `${extractFn('pathOf')}
@@ -676,8 +684,8 @@ suite('ui/panelHtml: renderPanelHtml', () => {
       'c:\\ws\\src\\Foo.al',
       'a file: drive-letter path must render in native Windows form');
     assert.strictEqual(
-      displayPathOf({ uri: { scheme: 'file', path: '/home/u/Foo.al' } }),
-      '/home/u/Foo.al',
+      displayPathOf({ uri: { scheme: 'file', path: '/home/u/src/Foo.al' } }),
+      '/home/u/src/Foo.al',
       'a POSIX file: path must render unchanged');
 
     // #132: subscribers parsed from a packaged .app carry the synthetic
@@ -692,6 +700,63 @@ suite('ui/panelHtml: renderPanelHtml', () => {
 
     assert.strictEqual(displayPathOf(null), null,
       'a missing location must yield null, matching pathOf');
+  });
+
+  test('displayPathOf keeps the authority of a UNC file: URI instead of truncating to uri.path (issue #183 review)', () => {
+    // The second `uriToFsPath` divergence branch. `Uri.parse(
+    // "file://server/share/Foo.al")` yields authority `server` + path
+    // `/share/Foo.al`, and `uriToFsPath` takes its FIRST branch —
+    // `//${authority}${path}` — which the isWindows rewrite then turns into
+    // `\\server\share\Foo.al` (the rewrite trails the whole ternary via the
+    // comma operator, so it applies to this branch too).
+    //
+    // Reading `uri.path` alone drops the server name entirely, rendering
+    // `/share/Foo.al`: not copy-pasteable, and ambiguous between two servers
+    // hosting the same share name.
+    //
+    // Fixtures are hand-written literals for the same portability reason as the
+    // test above — a UNC fixture derived from a real `vscode.Uri` would diverge
+    // on POSIX too, but only because `fsPath` there is `//server/share/Foo.al`,
+    // which is a different assertion than the one that matters.
+    const displayPathOf = new Function(
+      'loc',
+      `${extractFn('pathOf')}
+       ${extractFn('displayPathOf')}
+       return displayPathOf(loc);`
+    ) as (loc: unknown) => string | null;
+
+    const unc = displayPathOf({
+      uri: { scheme: 'file', authority: 'server', path: '/share/Foo.al' }
+    });
+    assert.strictEqual(unc, '\\\\server\\share\\Foo.al',
+      'a UNC file: URI must render with its authority, not truncated to the path');
+    assert.ok(unc!.includes('server'),
+      'the UNC server name must never be dropped from the displayed path');
+
+    // The authority branch must be tested BEFORE the drive-letter branch, as
+    // upstream does — an administrative share is a share, not a local drive.
+    assert.strictEqual(
+      displayPathOf({ uri: { scheme: 'file', authority: 'server', path: '/c$/ws/Foo.al' } }),
+      '\\\\server\\c$\\ws\\Foo.al',
+      'an administrative-share UNC path must keep its authority');
+
+    // `p.length > 1` mirrors uriToFsPath's own guard: an authority with a bare
+    // `/` path is not a UNC path.
+    assert.strictEqual(
+      displayPathOf({ uri: { scheme: 'file', authority: 'server', path: '/' } }),
+      '/',
+      'an authority with a one-character path must not take the UNC branch');
+
+    // An authority on a non-`file:` scheme must not trigger UNC rendering — the
+    // scheme guard that protects the synthetic `al-eventlens-app:` scheme
+    // (#132) has to hold for authority-bearing URIs as well.
+    const remote = displayPathOf({
+      uri: { scheme: 'vscode-remote', authority: 'wsl+ubuntu', path: '/home/u/src/Foo.al' }
+    });
+    assert.strictEqual(remote, '/home/u/src/Foo.al',
+      'a non-file: scheme with an authority must render its plain path');
+    assert.ok(!remote!.includes('\\'),
+      'a non-file: scheme must never be backslash-mangled');
   });
 
   test('lineOf reads the two-element array shape that Range.toJSON actually produces (issue #183)', () => {
@@ -1124,7 +1189,10 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
 
       openPanel(fakeContext, store);
       const fake = createCalls[0];
-      const indexPost = fake.serializedPosts[0] as { type: string; subscribers: unknown[] };
+      const indexPost = fake.serializedPosts[0] as {
+        type: string;
+        subscribers: Array<{ location: { uri: { fsPath?: string; path: string } } }>;
+      };
       assert.strictEqual(indexPost.type, 'index');
       assert.strictEqual(indexPost.subscribers.length, 1);
 
@@ -1145,9 +1213,15 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
       assert.strictEqual(revealPost.type, 'revealSubscriber');
 
       if (process.platform === 'win32') {
-        // Guard that the scenario is genuinely exercised here: the warmed
-        // payload really must carry a divergent fsPath, or this test would
-        // silently stop covering anything on its one meaningful platform.
+        // Guard that the scenario is genuinely exercised here: the scenario is
+        // the cold→warm transition, so BOTH ends must be pinned. Asserting only
+        // that the warmed payload diverges leaves the test able to go vacuous
+        // in silence — if some future read of `.fsPath` inside openPanel or the
+        // store warms `_fsPath` before the `index` post, both payloads would
+        // carry the same fsPath, the key equality below would hold trivially,
+        // and this guard would stay green.
+        assert.strictEqual(indexPost.subscribers[0].location.uri.fsPath, undefined,
+          'precondition (win32): the index payload must be serialized before _fsPath is warmed');
         const revealUri = revealPost.subscriber.location.uri;
         assert.ok(typeof revealUri.fsPath === 'string' && revealUri.fsPath.length > 0,
           'precondition (win32): the post-tree reveal payload must carry a serialized fsPath');
