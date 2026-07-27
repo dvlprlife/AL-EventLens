@@ -28,7 +28,11 @@ import { EventIndexStore } from './store';
  * refresh (issue #181). The bespoke per-registration sequence counter
  * this file used to carry is gone; the module-scoped `latestRunSeq` in
  * `reindex.ts` answers the same "has a newer full run started since me?"
- * question for all three callers at once.
+ * question for all three callers at once — and, since issue #195, the
+ * stand-down that follows depends on that newer run's *outcome*: a
+ * rebuild superseded by a full run that then fails is re-issued rather
+ * than dropped. So this path is no longer strictly weaker than the
+ * bespoke counter it replaced.
  */
 export function registerWorkspaceFolderReindex(
   context: vscode.ExtensionContext,

@@ -58,6 +58,31 @@ function surfaceParserBug(err: unknown): void {
 }
 
 /**
+ * Launch exactly one replacement run for a full scan that was built and
+ * then discarded. Started WITHOUT `reissueIfSuperseded`, so a replacement
+ * can never arm another — and, because both `rebuildOwed = true`
+ * assignments sit inside the same flag-gated block, can never record a
+ * debt either. That flag-off argument list is the entire rebuild-loop
+ * bound, and it lives here, at the one place a re-issue starts.
+ *
+ * Detached on purpose: the caller's `done` reports the ORIGINAL run's
+ * outcome, so no caller catch covers this one. Its own catch therefore
+ * logs AND routes a parser bug through `surfaceParserBug`, or a failure
+ * landing here instead of on the original would lose the toast.
+ */
+function startReissue(
+  context: vscode.ExtensionContext,
+  store: EventIndexStore,
+  indexFn: (ctx: vscode.ExtensionContext) => Promise<EventIndex>
+): void {
+  runIndexAndCommit(context, store, indexFn).done
+    .catch((err) => {
+      console.error('AL EventLens: re-issued index run failed', err);
+      surfaceParserBug(err);
+    });
+}
+
+/**
  * Monotonic generation counter used to drop late-resolving index runs that
  * have been superseded by a newer one. Every entry to `runIndexAndCommit`
  * increments this; the captured value is compared against `latest` just
@@ -80,9 +105,18 @@ let latestStartedGeneration = 0;
  * superseded, `runSeq === latestRunSeq` means "no newer FULL run exists,
  * so a save delta bumped past me and the full scan I just built is not
  * coming back from anywhere" → re-issue. `runSeq !== latestRunSeq` means
- * "a newer full run took over" → stand down. That test is for the
- * *existence* of a newer full run, not for its success — see the comment
- * at the check itself in `runIndexAndCommit` for what that costs.
+ * "a newer full run took over" → consult that run's OUTCOME before
+ * standing down.
+ *
+ * This counter records *entry* only, and is deliberately monotonic — it is
+ * never rolled back, not even when the run that took it rejects. Rolling
+ * it back would resurrect a stale value the moment a third run had already
+ * entered, silently disabling the save-path re-issue for that third run.
+ * `latestCommittedRunSeq` and `latestFailedRunSeq` are what turn entry into
+ * outcome; the save branch above is still checked FIRST, before either of
+ * them, so a run superseded by a save alone can never reach them (a save
+ * does not move this counter, so such a run always satisfies
+ * `runSeq === latestRunSeq`).
  *
  * Module-scoped for the same reason `latestStartedGeneration` is: there is
  * exactly one active store per activation, and the activation pass, the
@@ -90,6 +124,37 @@ let latestStartedGeneration = 0;
  * each other as "a newer full run".
  */
 let latestRunSeq = 0;
+
+/**
+ * `runSeq` of the newest run whose `store.set` actually ran. Only ever
+ * moves forward: committing requires `generation === latestStartedGeneration`,
+ * and every later `runIndexAndCommit` entry bumps `latestStartedGeneration`,
+ * so a committing run always holds `runSeq === latestRunSeq` at commit
+ * time. `latestCommittedRunSeq > runSeq` therefore reads exactly as "a
+ * strictly newer full run already committed a full scan", which is the one
+ * case in which a superseded run owes the workspace nothing at all.
+ */
+let latestCommittedRunSeq = 0;
+
+/**
+ * `runSeq` of the newest run whose `indexFn` rejected. Lets a superseded
+ * run distinguish "the newer run that took over is still in flight" (hand
+ * the rebuild off to it) from "the newest run has already failed and
+ * nothing newer entered behind it" (nobody is left, so rebuild ourselves).
+ */
+let latestFailedRunSeq = 0;
+
+/**
+ * Set by a superseded run that discarded a full scan and handed the
+ * rebuild off to the newer run that took over. Discharged when that run
+ * commits (its scan *is* the rebuild) or rejects (it re-issues on the
+ * superseded run's behalf).
+ *
+ * Deliberately a boolean, not a count: two superseded runs both owed a
+ * rebuild are satisfied by one full scan. The debt is "the store may be
+ * missing content", not "N scans are outstanding".
+ */
+let rebuildOwed = false;
 
 /**
  * Bump the started-generation counter and return the new value. The
@@ -102,7 +167,14 @@ let latestRunSeq = 0;
  * Deliberately does NOT bump `latestRunSeq` — that omission is
  * load-bearing. It is what lets a superseded full run tell "a save delta
  * bumped past me" (re-issue) from "a newer full run bumped past me"
- * (stand down). See `RunIndexOptions.reissueIfSuperseded`.
+ * (consult that run's outcome). See `RunIndexOptions.reissueIfSuperseded`.
+ *
+ * The asymmetry also keeps a save out of the outcome-tracking state added
+ * for issue #195 entirely: because a save leaves `latestRunSeq` alone, a
+ * run superseded by a save alone always satisfies `runSeq === latestRunSeq`
+ * and takes the first branch in `runIndexAndCommit`, which is checked
+ * before `latestCommittedRunSeq` / `latestFailedRunSeq` / `rebuildOwed` are
+ * consulted at all. Do not add a `latestRunSeq` bump here.
  */
 export function bumpStartedGeneration(): number {
   return ++latestStartedGeneration;
@@ -118,10 +190,19 @@ export function bumpStartedGeneration(): number {
  * Production code other than `deactivate()` MUST NOT call this; doing so
  * would invalidate every in-flight `runIndexAndCommit`'s captured token
  * at once.
+ *
+ * Zeroing here is not sufficient on its own: a run that entered BEFORE the
+ * reset would otherwise find `latestFailedRunSeq === latestRunSeq`
+ * vacuously true (`0 === 0`) and fire a re-issue against a disposed store.
+ * The `runSeq > latestRunSeq` early return on both settle handlers in
+ * `runIndexAndCommit` is what stops that — see the comment there.
  */
 export function resetExtensionStateForReload(): void {
   latestStartedGeneration = 0;
   latestRunSeq = 0;
+  latestCommittedRunSeq = 0;
+  latestFailedRunSeq = 0;
+  rebuildOwed = false;
 }
 
 /**
@@ -139,10 +220,12 @@ export interface RunIndexResult {
   /**
    * True only when `committed` is false AND this run responded by
    * launching exactly one fresh replacement run (see
-   * `RunIndexOptions.reissueIfSuperseded`). Lets callers log "superseded
-   * by a save, re-indexing" separately from "superseded by a newer index
-   * run, discarding" — the two cases have opposite user-visible
-   * consequences and the old single log line conflated them.
+   * `RunIndexOptions.reissueIfSuperseded`). Lets callers log "superseded,
+   * re-indexing" separately from "superseded, discarding" — the two cases
+   * have opposite user-visible consequences and the old single log line
+   * conflated them. It does NOT name the cause: a re-issue follows either
+   * a save delta or a newer full run that failed, so a caller's log line
+   * must stay cause-neutral.
    */
   readonly reissued: boolean;
 }
@@ -164,10 +247,13 @@ export interface RunIndexOptions {
    * re-issued run re-reads the saved file from disk: the delta that
    * superseded us is re-derived by the replacement scan, not lost.
    *
-   * The converse — standing down because a newer full run exists — is
-   * only sound when that newer run goes on to commit. If it rejects
-   * instead, this run's discarded scan is not rebuilt by anyone. See the
-   * KNOWN GAP note at the check in `runIndexAndCommit` (issue #195).
+   * The converse — standing down because a newer full run exists — waits
+   * on that newer run's *outcome*, not merely its existence: it commits
+   * (its scan covers ours, so nothing is owed), or it is still in flight
+   * (the rebuild is handed off to it and it re-issues on our behalf if it
+   * rejects), or it has already rejected with nothing newer behind it (so
+   * this run re-issues itself). Either way exactly one replacement scan
+   * results — one run + one re-issue, never a rebuild loop.
    *
    * Default `false`, so the primitive's last-started-wins contract is
    * unchanged for any caller that does not ask for recovery.
@@ -198,12 +284,15 @@ export interface RunIndexOptions {
  * the synchronous `runIndexAndCommit` entry that returns a `{ done }`
  * promise alongside.
  *
- * With `options.reissueIfSuperseded`, a run whose commit was suppressed
- * by a *save* (rather than by a newer full run) launches exactly one
- * replacement run before resolving — see `RunIndexOptions`. The re-issue
+ * With `options.reissueIfSuperseded`, a run whose commit was suppressed —
+ * by a save delta, or by a newer full run that then failed rather than
+ * committing — launches exactly one replacement run before resolving; and
+ * a run that supersedes such a run and then rejects itself launches that
+ * replacement on its behalf. See `RunIndexOptions`. The re-issue
  * is deliberately detached: `done` still resolves with THIS run's result,
  * so callers stay fire-and-forget and the returned `reissued` flag is
- * what tells them which of the two supersession causes applied. Because
+ * what tells them whether the discarded scan is coming back or not (it
+ * does NOT name the cause — see `RunIndexResult.reissued`). Because
  * it is detached, no caller catch covers it, so its own catch logs AND
  * routes a parser bug through `surfaceParserBug` — otherwise a failure
  * landing on the re-issue instead of the original would lose the toast.
@@ -216,44 +305,101 @@ export function runIndexAndCommit(
 ): { generation: number; done: Promise<RunIndexResult> } {
   const generation = ++latestStartedGeneration;
   const runSeq = ++latestRunSeq;
-  const done = indexFn(context).then((index): RunIndexResult => {
-    if (generation === latestStartedGeneration) {
-      store.set(index);
-      return { index, committed: true, reissued: false };
+  // Two handlers, NOT `.then(...).catch(...)`: a throw out of the success
+  // handler must not fall into the failure handler and be mistaken for an
+  // `indexFn` rejection.
+  const done = indexFn(context).then(
+    (index): RunIndexResult => {
+      if (generation === latestStartedGeneration) {
+        store.set(index);
+        latestCommittedRunSeq = runSeq;
+        // A committed full scan IS the rebuild anyone was owed.
+        rebuildOwed = false;
+        return { index, committed: true, reissued: false };
+      }
+      // Superseded. Everything below is bookkeeping for who, if anyone,
+      // still owes the workspace a full scan.
+      if (runSeq > latestRunSeq) {
+        // Only reachable when `resetExtensionStateForReload` ran while we
+        // were in flight: `latestRunSeq` is monotonic otherwise. Our token
+        // belongs to a previous activation, `store` is disposed, and every
+        // counter below is now about a different session — stand down and
+        // write nothing. Without this the post-reset `0 === 0` would make
+        // `latestFailedRunSeq === latestRunSeq` vacuously true and fire a
+        // rebuild against a disposed store.
+        return { index, committed: false, reissued: false };
+      }
+      if (options.reissueIfSuperseded === true) {
+        // The three-way decision. `latestRunSeq` records ENTRY, so on its
+        // own it answers "did a newer full run start?" when what matters
+        // is "will a newer full run commit?" — `latestCommittedRunSeq` and
+        // `latestFailedRunSeq` supply the outcome. Do NOT "simplify" this
+        // back to a bare existence test: that was the #195 gap, and do not
+        // replace it by rolling `latestRunSeq` back either — a third run
+        // then inherits a resurrected sequence number. This module's
+        // concurrency shortcuts have a history (#113, #119, #181, #195) of
+        // costing more than they save.
+        if (runSeq === latestRunSeq) {
+          // A save delta bumped past us and no newer full run exists, so
+          // nothing else is going to rebuild what we just threw away
+          // (#181). Checked FIRST: a save never moves `latestRunSeq`, so a
+          // save-superseded run never reaches the outcome state below.
+          startReissue(context, store, indexFn);
+          return { index, committed: false, reissued: true };
+        }
+        if (latestCommittedRunSeq <= runSeq) {
+          // A newer full run entered but none of them has committed.
+          if (latestFailedRunSeq === latestRunSeq) {
+            // ...and the newest one already failed, with nothing newer
+            // behind it. Nobody is left to rebuild, so we do (#195).
+            startReissue(context, store, indexFn);
+            return { index, committed: false, reissued: true };
+          }
+          // The newest run is still in flight. Hand the rebuild off: it
+          // either commits (clearing this) or, when it rejects, re-issues
+          // on our behalf. Re-issuing here instead would race a run that
+          // is about to commit — the #113/#119 bug class.
+          rebuildOwed = true;
+        }
+        // else: a strictly newer full run already committed a full scan,
+        // so nothing is owed and recording a debt here would make it
+        // permanently sticky. Stand down.
+        //
+        // Residual bound, unchanged in shape from #181: if a debt is owed
+        // and the newest run is a flag-off replacement that gets superseded
+        // by a SAVE (rather than committing or rejecting), the debt sits
+        // until the next full run settles. That is still at most one extra
+        // scan, and it matches the "two saves inside the activation window
+        // leave the store partial" bound already recorded in the CHANGELOG.
+      }
+      return { index, committed: false, reissued: false };
+    },
+    (err: unknown): never => {
+      if (runSeq <= latestRunSeq) {
+        // Same post-reset guard as the success path: skip all bookkeeping
+        // when a reset ran under us, or this run's large stale seq would
+        // poison the next activation's counters.
+        if (runSeq > latestFailedRunSeq) {
+          latestFailedRunSeq = runSeq;
+        }
+        if (rebuildOwed && runSeq === latestRunSeq) {
+          // We superseded a run that discarded its scan for us, and we
+          // have nothing to commit. Nothing newer entered, so the debt
+          // stops here. Clear it BEFORE starting the replacement: that is
+          // what makes each debt discharge exactly once, so a replacement
+          // that also fails cannot start a third run.
+          rebuildOwed = false;
+          console.log('AL EventLens: the index run that superseded an earlier rebuild failed - re-indexing');
+          startReissue(context, store, indexFn);
+        }
+      }
+      // Rethrown unmodified: `runInitialIndex`'s empty-index fallback and
+      // parser-bug toast, `runRefreshIndex`'s log, `folderWatcher`'s log,
+      // and the suite's `assert.rejects` all depend on `done` still
+      // rejecting with this exact error.
+      throw err;
     }
-    // Superseded. Re-issue only when a save delta — not a newer full run —
-    // is what bumped past us, and only when the caller asked for recovery.
-    // `runSeq === latestRunSeq` is that test: no other full run has entered
-    // since we did, so nothing else is going to rebuild what we just threw
-    // away. The replacement is started WITHOUT the flag, so it can never
-    // arm another: one run + one re-issue, max.
-    //
-    // KNOWN GAP — the stand-down tests only for the *existence* of a newer
-    // full run, never for its outcome. If that newer run's `buildIndex`
-    // rejects (a parser bug or transient I/O — both are handled paths), it
-    // commits nothing, and this run has already discarded the scan it
-    // built: the work is lost until the next save, folder change, or
-    // manual Refresh. The pre-#181 folder-change path re-issued in that
-    // case, because its bespoke counter was bumped only by folder changes;
-    // the save path never did. Closing it needs the counter to record
-    // completion, not just entry, which is a real concurrency change and
-    // this file's concurrency changes have a history (#113/#119) of
-    // costing more than they fix. Tracked as issue #195 rather than
-    // folded in here — do not "simplify" this comment away.
-    if (options.reissueIfSuperseded === true && runSeq === latestRunSeq) {
-      runIndexAndCommit(context, store, indexFn).done
-        .catch((err) => {
-          console.error('AL EventLens: re-issued index run failed', err);
-          // The re-issue is detached, so no caller's catch runs for it.
-          // Without this the activation pass's parser-bug toast would be
-          // silently lost whenever the failure landed on the re-issued run
-          // rather than the original.
-          surfaceParserBug(err);
-        });
-      return { index, committed: false, reissued: true };
-    }
-    return { index, committed: false, reissued: false };
-  });
+  );
   return { generation, done };
 }
 
@@ -294,7 +440,10 @@ export async function runInitialIndex(
     if (committed) {
       console.log(`AL EventLens: indexed ${index.publishers.length} publishers, ${index.subscribers.length} subscribers`);
     } else if (reissued) {
-      console.log('AL EventLens: initial index superseded by a file save - re-indexing');
+      // Cause-neutral on purpose: `reissued` now covers both a save delta
+      // and a newer full run that failed, and naming only the first would
+      // be exactly the misleading log line #181 was filed about.
+      console.log('AL EventLens: initial index superseded before it could commit - re-indexing');
     } else {
       console.log('AL EventLens: initial index superseded by a newer index run - discarding this result');
     }
@@ -327,7 +476,8 @@ export async function runRefreshIndex(
       context, store, indexFn, { reissueIfSuperseded: true }
     ).done;
     if (!committed && reissued) {
-      console.log('AL EventLens: refresh superseded by a file save - re-indexing');
+      // Cause-neutral: see the matching note in `runInitialIndex`.
+      console.log('AL EventLens: refresh superseded before it could commit - re-indexing');
     } else if (!committed) {
       console.log('AL EventLens: refresh superseded by a newer index run - discarding this result');
     }

@@ -351,10 +351,11 @@ suite('index/folderWatcher: registerWorkspaceFolderReindex', () => {
     // When the superseding run COMMITS — which is what this test sets up —
     // the end state is identical and only the wasted scan is gone: the
     // superseding run reads `workspaceFolders` at call time, so it
-    // includes the newly-added folder. That equivalence does NOT hold if
-    // the superseding run rejects; the rebuild is then dropped and nothing
-    // replaces it. See the KNOWN GAP note in `reindex.ts` — that case is
-    // tracked as issue #195, not asserted here.
+    // includes the newly-added folder. When the superseding run REJECTS
+    // instead, that equivalence does not hold — the rebuild would be
+    // dropped with nothing to replace it — so the stand-down now waits on
+    // the superseding run's outcome and re-issues in that case. The test
+    // below (`...superseded by a full run that FAILS...`) pins it.
     patchOnDidChange();
     const store = new EventIndexStore();
     try {
@@ -393,6 +394,74 @@ suite('index/folderWatcher: registerWorkspaceFolderReindex', () => {
         'a folder rebuild superseded by a newer FULL RUN must not fire a redundant duplicate scan');
       assert.strictEqual(store.get(), refreshIndex,
         'the store reflects the committed newer run');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a folder rebuild superseded by a full run that FAILS is re-issued and the added folder is indexed', async () => {
+    // Issue #195, stated in the terms the user experiences it: the user
+    // adds a workspace folder, the rebuild that kicks off is superseded by
+    // a manual Refresh (or an activation pass), and that run then fails —
+    // a parser bug or a transient I/O error, both handled paths. The
+    // rebuild had already discarded its own scan on the strength of the
+    // superseding run existing, so the newly-added folder's publishers
+    // appeared nowhere until the next save, folder change, or Refresh.
+    //
+    // The stand-down now consults the superseding run's OUTCOME, so the
+    // rebuild is re-issued and the added folder lands. The counterpart
+    // where the superseding run commits is the test above, unchanged.
+    patchOnDidChange();
+    const store = new EventIndexStore();
+    try {
+      // The "new folder included" snapshot the re-issued rebuild returns.
+      const newFolderIndex: EventIndex = {
+        publishers: [{ owner: { kind: 'codeunit', name: 'AddedFolderCu' }, eventName: 'OnFolderAdded', kind: 'integration' }],
+        subscribers: [],
+        appMeta: new Map()
+      };
+
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      let calls = 0;
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      registerWorkspaceFolderReindex(fakeContext(), store, indexFn);
+
+      // Folder change → rebuild starts, suspended.
+      captured!(fakeEvent());
+      await flush();
+      assert.strictEqual(calls, 1, 'folder change starts exactly one rebuild');
+
+      // A separate full run — a manual Refresh — starts and FAILS.
+      const refresh = runIndexAndCommit(
+        fakeContext(), store, async () => { throw new Error('synthetic refresh failure'); }
+      );
+      await assert.rejects(refresh.done, /synthetic refresh failure/);
+
+      // The folder rebuild now resolves superseded — by a full run that
+      // committed nothing, so the rebuild must be re-issued.
+      deferreds[0].resolve(emptyIndex);
+      await flush();
+      assert.strictEqual(calls, 2,
+        'a folder rebuild superseded by a full run that FAILED must be re-issued');
+
+      deferreds[1].resolve(newFolderIndex);
+      await flush();
+
+      assert.strictEqual(store.get(), newFolderIndex,
+        'the re-issued rebuild commits the full workspace including the new folder');
+      assert.strictEqual(store.isInitialized, true,
+        'the committed re-issue flips isInitialized');
+      const names = store.get().publishers.map((p) => p.eventName);
+      assert.ok(names.includes('OnFolderAdded'),
+        `the new folder's publisher must be present; got [${names.join(', ')}]`);
+      assert.strictEqual(calls, 2,
+        'the replacement carries the flag OFF — no rebuild loop');
     } finally {
       store.dispose();
     }
