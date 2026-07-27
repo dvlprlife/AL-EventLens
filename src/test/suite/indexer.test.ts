@@ -1690,6 +1690,90 @@ suite('index/indexer: buildIndex', () => {
     assert.strictEqual(entry!.isWorkspaceApp, true,
       'isWorkspaceApp: true must be preserved on the merged entry — ' +
       'otherwise the tree drops the workspace-first sort and root-folder icon');
+    // On the DEFAULT `includeAllAppVersions: false` path the no-metadata URI
+    // is dropped at version selection (`selectHighestVersionPerAppId`), so the
+    // Pass-2 retry is never reached here and the twin contributes nothing. The
+    // `includeAllAppVersions: true` test below exercises the retry itself
+    // (#184 D3); this one pins the invariant on the default path.
+    assert.ok(!idx.publishers.some((p) => p.eventName === 'OnAppEvent'),
+      'the excluded twin must contribute no SymbolReference publishers');
+    assert.strictEqual(idx.publishers.length, 1,
+      'only the workspace-source publisher may appear');
+    assert.strictEqual(idx.publishers[0].eventName, 'OnAfterFoo');
+  });
+
+  test('a workspace-twin .app whose metadata pre-read fails is not indexed twice (#184 D3)', async () => {
+    // `excludeWorkspaceApps` keeps a URI whose manifest pre-read failed (it has
+    // no appId to judge on) and the Pass-2 worker retries the read. Under
+    // `includeAllAppVersions: true` — the only path where a no-metadata URI
+    // survives version selection — the retry succeeds, the compiled twin is
+    // read in full, and its SymbolReference publishers used to merge alongside
+    // the authoritative workspace-source ones, listing every event twice.
+    const APP_ID = '11111111-1111-1111-1111-111111111111';
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    // SymbolReference mirrors the workspace source, so a leak is a literal
+    // duplicate of OnAfterFoo rather than an extra unrelated event.
+    const appBytes = await buildAppBytes({
+      symbolReferenceJson: JSON.stringify({
+        AppId: APP_ID,
+        Codeunits: [
+          {
+            Name: 'My Codeunit',
+            Methods: [{ Name: 'OnAfterFoo', Attributes: [{ Name: 'IntegrationEvent' }] }]
+          }
+        ]
+      })
+    });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(SAMPLE_APP_JSON)],
+        [appUri.toString(), appBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      appJsonFiles: [appJsonUri],
+      fs,
+      includeAllAppVersions: true,
+      includeTriggerEvents: false
+    });
+    // FIRST read of `appUri` (the metaByUri pre-read) throws, leaving the URI
+    // absent from metaByUri; later reads succeed, so the Pass-2 retry works.
+    const previousFs = vscode.workspace.fs;
+    let appReadCalls = 0;
+    const wrappedFs = {
+      ...previousFs,
+      readFile: async (uri: vscode.Uri): Promise<Uint8Array> => {
+        if (uri.toString() === appUri.toString()) {
+          appReadCalls++;
+          if (appReadCalls === 1) {
+            throw new Error('synthetic: metaByUri pre-read failed');
+          }
+        }
+        return previousFs.readFile(uri);
+      }
+    } as typeof vscode.workspace.fs;
+    Object.defineProperty(vscode.workspace, 'fs', { configurable: true, value: wrappedFs });
+
+    const idx = await buildIndex(fakeContext());
+
+    const foo = idx.publishers.filter((p) => p.eventName === 'OnAfterFoo');
+    assert.strictEqual(foo.length, 1,
+      `the compiled twin must not duplicate the workspace publisher (got ${foo.length})`);
+    // `parseSymbolReference` emits `location: undefined`; workspace-source
+    // publishers carry a real `vscode.Location`. The survivor must be the
+    // workspace one — the authoritative source per CLAUDE.md.
+    assert.ok(foo[0].location !== undefined,
+      'the surviving publisher must be the workspace-source one, not the .app copy');
+    // The retry-time exclusion returns early, so re-assert the #105 guarantee
+    // on that path.
+    assert.strictEqual(idx.appMeta.get(APP_ID)?.isWorkspaceApp, true,
+      'isWorkspaceApp: true must survive the retry-time exclusion');
+    assert.ok(appReadCalls >= 2, 'the Pass-2 metadata retry must actually run');
   });
 
   // ─── #115: Pass-1 error handling — read vs parse split ─────────────────

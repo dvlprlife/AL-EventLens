@@ -16,8 +16,34 @@ const objectHeaderRe = new RegExp(
 
 const publisherAttrRe = /\[\s*(IntegrationEvent|BusinessEvent)\s*(?:\([^)]*\))?\s*\]/gi;
 
+// The tail after the event name — `, 'Element', false, false` and its
+// pre-BC22/BC22+ variants — is matched as `[^[]{0,512}?` rather than
+// `[\s\S]*?`, for two reasons:
+//
+//  1. It may not cross a `[`. Every AL attribute opens with one, so an
+//     attribute left without its closing `)]` — an ordinary mid-edit /
+//     autosave state — can no longer run forward and consume the NEXT
+//     attribute's terminator. That used to yield one match spanning both
+//     attributes: capture groups came from the malformed attribute, the match
+//     END sat past the valid one, so the malformed target was bound to the
+//     valid attribute's procedure and the valid subscriber vanished from the
+//     index entirely (issue #184 D1).
+//  2. The `{0,512}` cap bounds the per-match scan the way
+//     PROCEDURE_SEARCH_WINDOW bounds the procedure search: the real tail is a
+//     few dozen characters even heavily wrapped, so the cap stops a file full
+//     of unterminated attributes from re-scanning to EOF once per match.
+//
+// Accepted trade-off: a `[` inside the trailing element-name string literal
+// (`'Line[1]'`) no longer matches. Element names are field/control
+// identifiers, so that is not realistic AL, and the failure mode (subscriber
+// not detected) is strictly no worse than the pre-fix behavior for the
+// malformed case. Genuine multi-line attributes are unaffected — the class
+// excludes only `[`, not newlines.
+//
+// `[^[]`, not `[^\[]`: `[` is not special inside a character class and the
+// escaped form trips ESLint's `no-useless-escape`.
 const subscriberAttrRe =
-  /\[\s*EventSubscriber\s*\(\s*ObjectType::([A-Za-z]+)\s*,\s*[A-Za-z]+::(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))\s*,\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))[\s\S]*?\)\s*\]/gi;
+  /\[\s*EventSubscriber\s*\(\s*ObjectType::([A-Za-z]+)\s*,\s*[A-Za-z]+::(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))\s*,\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))[^[]{0,512}?\)\s*\]/gi;
 
 const procedureRe =
   /^[ \t]*(?:local|internal|protected)?[ \t]*procedure[ \t]+("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)/m;
@@ -459,6 +485,31 @@ function splitParameterList(inner: string): string[] {
 }
 
 /**
+ * Index of the first `:` outside a quoted AL identifier, or -1.
+ *
+ * The `Name : Type` separator is the first *unquoted* colon: a quoted
+ * parameter name or subtype (`"My:Param"`, `Record "Ns::X"`) may legally
+ * contain one. Mirrors the `"…"`-skipping the sibling scanners
+ * (`parseParameterListAt`, `splitParameterList`) already do for `(`/`)`/`;` —
+ * issue #133 fixed those two and left this one quote-blind, so
+ * `"My:Param": Integer` parsed as name `"My`, type `Param": Integer` (#184 D2).
+ * A single toggle on `"` suffices: AL quoted identifiers have no
+ * embedded-quote escape.
+ */
+function indexOfUnquotedColon(s: string): number {
+  let inQuote = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === '"') {
+      inQuote = !inQuote;
+    } else if (!inQuote && ch === ':') {
+      return i;
+    }
+  }
+  return -1;
+}
+
+/**
  * Parse one AL parameter declaration of the form `[var ] Name : Type`. The
  * `Type` portion is preserved verbatim (whitespace trimmed) — collapsing it
  * into a richer model isn't necessary for display.
@@ -471,7 +522,7 @@ function parseOneParameter(raw: string): Parameter | undefined {
     isVar = true;
     s = s.slice(varMatch[0].length);
   }
-  const colonIdx = s.indexOf(':');
+  const colonIdx = indexOfUnquotedColon(s);
   if (colonIdx < 0) {
     return undefined;
   }

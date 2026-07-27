@@ -288,9 +288,29 @@ export async function buildIndex(
         // a cold start over many packages reusing the map halves the
         // per-package work on a cache hit. The map is now always built, so
         // the fall-through only covers a single URI whose manifest read
-        // failed during the map pass (such a URI is kept by the selection
-        // helpers so this loop's try/catch can surface the failure).
-        const meta = metaByUri.get(uri.toString()) ?? await readAppMetadata(uri);
+        // failed during the map pass. Reachable only on the
+        // `includeAllAppVersions: true` path: `dedupByAppIdVersion` keeps a
+        // no-metadata URI so this loop's try/catch can surface the failure,
+        // while `selectHighestVersionPerAppId` (the default path) drops it.
+        let meta = metaByUri.get(uri.toString());
+        if (!meta) {
+          // The manifest pre-read failed for this URI, so `excludeWorkspaceApps`
+          // kept it — it had no appId to judge on. Retry here, since a transient
+          // failure (AV lock, brief I/O error) must not drop a real dependency
+          // package, but re-apply the workspace-twin check now that `appId` is
+          // finally known. Without it a twin whose pre-read blipped is read in
+          // full and its SymbolReference publishers merge alongside the
+          // authoritative workspace-source ones, listing every event of that app
+          // twice until the next clean rebuild (issue #184 D3).
+          meta = await readAppMetadata(uri);
+          if (workspaceAppIds.has(meta.appId.toLowerCase())) {
+            console.warn(
+              `AL EventLens: skipping ${uri.fsPath} — compiled twin of workspace app ` +
+              `${meta.appId} (manifest pre-read failed; exclusion re-checked after retry)`
+            );
+            return undefined;
+          }
+        }
         const key: CacheKey = { appId: meta.appId, version: meta.version, mtime: stat.mtime };
         const cached = await loadCachedSymbols(context, key);
         if (cached) {
@@ -475,6 +495,9 @@ async function readAppMetadataMap(
  * between `app.json` and `NavxManifest.xml`. A URI absent from `metaByUri`
  * (its metadata read failed) is **kept**, so the main `readApp` loop's
  * existing try/catch still reports it rather than it being silently dropped.
+ * Keeping it can no longer produce a duplicate index: the Pass-2 worker retries
+ * the metadata read and re-checks twin exclusion once that retry yields an
+ * `appId` (issue #184 D3).
  */
 function excludeWorkspaceApps(
   uris: ReadonlyArray<vscode.Uri>,
