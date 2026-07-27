@@ -403,7 +403,7 @@ export function renderPanelHtml(nonce: string): string {
     '  const s = r.start || r._start || (Array.isArray(r) ? r[0] : null);',
     '  if (!s) return 0;',
     "  const ln = (s.line != null) ? s.line : s._line;",
-    '  return (ln | 0) + 1;',
+    '  return (ln != null) ? (ln | 0) + 1 : 0;',
     '}',
     '',
     'const MAX_LIST_ROWS = 500;',

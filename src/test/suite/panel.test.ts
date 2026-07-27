@@ -775,6 +775,10 @@ suite('ui/panelHtml: renderPanelHtml', () => {
       'the plain {start:{line}} shape must still work');
     assert.strictEqual(lineOf({ range: { _start: { _line: 6 } } }), 7,
       'the structured-clone {_start:{_line}} shape must still work');
+    assert.strictEqual(lineOf({ range: [{ _line: 8, _character: 2 }] }), 9,
+      'array elements with structured-clone {_line} shape must work (issue #196)');
+    assert.strictEqual(lineOf({ range: [{}] }), 0,
+      'array element without line/_line yields 0');
     assert.strictEqual(lineOf({}), 0, 'a location with no range yields 0');
     assert.strictEqual(lineOf(null), 0, 'a missing location yields 0');
   });
