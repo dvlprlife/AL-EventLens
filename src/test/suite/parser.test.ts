@@ -1,6 +1,6 @@
 import * as assert from 'assert';
 import * as vscode from 'vscode';
-import { parseAl } from '../../al/parser';
+import { parseAl, stripComments } from '../../al/parser';
 
 const uri = vscode.Uri.parse('untitled:test.al');
 
@@ -643,5 +643,348 @@ suite('al/parser: cross-object attribute binding (#159)', () => {
     assert.strictEqual(publishers.length, 1);
     assert.strictEqual(publishers[0].eventName, 'OnInA');
     assert.strictEqual(publishers[0].owner.name, 'A');
+  });
+});
+
+suite('al/parser: preprocessor directives (#182)', () => {
+  // Directive text (`#region` / `#endregion` / `#pragma`) is free text, not
+  // code, and legally contains apostrophes — `#region Customer's balance` is
+  // ordinary BC. Before the fix that apostrophe opened a phantom string state
+  // and inverted every subsequent boundary in the file, silently dropping real
+  // publishers and fabricating ones out of commented-out code.
+
+  test("an apostrophe in #region text does not drop a real publisher below it", () => {
+    // The phantom string opened at `Don't` closes on the Label literal's
+    // opening quote, which makes the literal's `/*` read as a real block-comment
+    // opener that blanks the rest of the file.
+    const src = [
+      'codeunit 50100 "T"',
+      '{',
+      "    #region Don't break",
+      '    #endregion',
+      "    var L: Label 'x /* y';",
+      '',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterFoo()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1,
+      'the publisher below the directive must survive the apostrophe');
+    assert.strictEqual(publishers[0].eventName, 'OnAfterFoo');
+    assert.strictEqual(publishers[0].owner.name, 'T');
+  });
+
+  test("an apostrophe in #region text does not fabricate a publisher from a block comment", () => {
+    // With the scanner believing it is inside a string, the block comment is
+    // never blanked and its commented-out attribute binds to the next real
+    // procedure.
+    const src = [
+      'codeunit 50101 "U"',
+      '{',
+      "    #region Don't index this",
+      '    #endregion',
+      '    /* [IntegrationEvent(false,false)]',
+      '       procedure DeadProc() */',
+      '    procedure RealProc()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 0,
+      'a commented-out attribute must stay commented out');
+  });
+
+  test("a block comment after an apostrophe directive is stripped even with the attribute on its own line", () => {
+    // Hardened variant of the case above: here the attribute is the only thing
+    // on its line, so nothing but `stripComments` blanking the block comment can
+    // suppress it. Keeps this a #182 regression test independently of the
+    // attribute line-anchor rule tracked by #179.
+    const src = [
+      'codeunit 50101 "U"',
+      '{',
+      "    #region Don't index this",
+      '    #endregion',
+      '    /*',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure DeadProc()',
+      '    */',
+      '    procedure RealProc()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 0,
+      'the whole block comment must be blanked, attribute included');
+  });
+
+  test('the same fixture without the apostrophe is unchanged (control)', () => {
+    const src = [
+      'codeunit 50101 "U"',
+      '{',
+      '    #region Dont index this',
+      '    #endregion',
+      '    /* [IntegrationEvent(false,false)]',
+      '       procedure DeadProc() */',
+      '    procedure RealProc()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 0);
+  });
+
+  test("directive text containing ' \" // and /* opens no scanner state", () => {
+    const src = [
+      'codeunit 50100 "Cu"',
+      '{',
+      '    #region a \' b " c // d /* e',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterBar()',
+      '    begin',
+      '    end;',
+      '    #endregion',
+      '}'
+    ].join('\n');
+    const cleaned = stripComments(src);
+    assert.ok(cleaned.includes('[IntegrationEvent(false, false)]'),
+      'the attribute below the directive must not be blanked or swallowed');
+    assert.ok(cleaned.includes('procedure OnAfterBar()'),
+      'the procedure below the directive must not be blanked or swallowed');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnAfterBar');
+  });
+
+  test('directive text survives verbatim but a trailing // comment is blanked', () => {
+    const src = [
+      'codeunit 50100 "P"',
+      '{',
+      '    #pragma implicitwith disable',
+      "    #region Customer's balance // Don't index this",
+      '',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnP()',
+      '    begin',
+      '    end;',
+      '    #endregion',
+      '    #pragma warning restore AA0005',
+      '}'
+    ].join('\n');
+    const cleaned = stripComments(src);
+    // Directive text is free text — its apostrophe must not open a string —
+    // but a trailing `//` on the line is a comment like any other and has to be
+    // blanked, or an `[IntegrationEvent]` written inside it would bind to the
+    // procedure below.
+    assert.ok(cleaned.includes("#region Customer's balance"),
+      'directive text is copied through verbatim, apostrophe included');
+    assert.ok(cleaned.includes('#pragma implicitwith disable'));
+    assert.ok(!cleaned.includes("Don't index this"),
+      'a trailing // comment on a directive line must be blanked like any other');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1,
+      'an apostrophe in directive text must not corrupt the scan');
+    assert.strictEqual(publishers[0].eventName, 'OnP');
+  });
+
+  test('a trailing // comment on a #pragma cannot fabricate a publisher', () => {
+    // The directive branch copies directive text verbatim; if it copied the
+    // trailing comment too, the attribute regexes would sweep it and bind a
+    // phantom publisher to the procedure below — a false positive that does not
+    // exist without the directive branch.
+    const src = [
+      'codeunit 50100 "T"',
+      '{',
+      '    #pragma warning disable AA0005 // [IntegrationEvent(false, false)]',
+      '    procedure NotAnEvent()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const cleaned = stripComments(src);
+    assert.ok(cleaned.includes('#pragma warning disable AA0005'),
+      'the directive text itself stays verbatim');
+    assert.ok(!cleaned.includes('[IntegrationEvent'),
+      'the commented-out attribute must not survive into the cleaned text');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 0,
+      'a commented-out attribute on a directive line must not bind a publisher');
+  });
+
+  test('blanking a trailing directive comment preserves length and CRLF terminators', () => {
+    // The blanking loop must skip the `\r` of a CRLF pair the way the ordinary
+    // line-comment branch does, or every offset after the directive shifts.
+    const src = [
+      'codeunit 50100 "T"',
+      '{',
+      "    #pragma warning disable AA0005 // Don't care",
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnX()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\r\n');
+    const cleaned = stripComments(src);
+    assert.strictEqual(cleaned.length, src.length,
+      'every downstream byte offset and jump-to-source Location depends on this');
+    for (let i = 0; i < src.length; i++) {
+      if (src[i] === '\n' || src[i] === '\r') {
+        assert.strictEqual(cleaned[i], src[i],
+          `line terminator at offset ${i} must be preserved`);
+      }
+    }
+    assert.ok(!cleaned.includes("Don't care"),
+      'the trailing comment is blanked, terminator aside');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnX');
+  });
+
+  test('a /* on a directive line is blanked to end of line and opens no block comment', () => {
+    // `/*` gets the same treatment as `//`: blanked, but only to the newline,
+    // so it neither fabricates from its own text nor swallows the real
+    // publisher below the way an unbounded block-comment state would.
+    const src = [
+      'codeunit 50100 "Cu"',
+      '{',
+      '    #region helpers /* [IntegrationEvent(false, false)]',
+      '    procedure NotAnEvent()',
+      '    begin',
+      '    end;',
+      '    #endregion',
+      '',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnReal()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const cleaned = stripComments(src);
+    assert.ok(cleaned.includes('#region helpers'),
+      'directive text before the delimiter survives');
+    assert.ok(!cleaned.includes('#region helpers /*'),
+      'the comment delimiter and everything after it on the line is blanked');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1,
+      'the block comment must not run past the directive line and swallow the file');
+    assert.strictEqual(publishers[0].eventName, 'OnReal');
+  });
+
+  test('a commented-out object header inside a #region block is still suppressed', () => {
+    // The rule is per line, not per region: everything between #region and
+    // #endregion is still scanned as code, so a `//`-commented header stays
+    // blanked.
+    const src = [
+      "#region Don't index this",
+      '// codeunit 50100 "Fake"',
+      '#endregion',
+      'codeunit 50101 "Real"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnReal()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].owner.name, 'Real',
+      'the commented-out header inside the region must not become an object');
+  });
+
+  test('a commented-out attribute inside a #region block is still suppressed', () => {
+    // The discriminating form of the case above. `objectHeaderRe` is anchored
+    // at `^\s*(kind)`, so a commented-out *header* can never match whether it
+    // is blanked or not; a commented-out *attribute* can, which is what makes
+    // this fixture prove the rule is per line rather than per region.
+    const src = [
+      'codeunit 50100 "Cu"',
+      '{',
+      "    #region Don't index this",
+      '    // [IntegrationEvent(false, false)]',
+      '    procedure NotAnEvent()',
+      '    begin',
+      '    end;',
+      '    #endregion',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 0,
+      'lines inside a #region block are still scanned as code, comments included');
+  });
+
+  test('directive text is copied through verbatim, not blanked', () => {
+    const src = [
+      'codeunit 50100 "T"',
+      '{',
+      "    #region Don't break",
+      '    #endregion',
+      '}'
+    ].join('\n');
+    const cleaned = stripComments(src);
+    assert.ok(cleaned.includes("#region Don't break"),
+      'blanking the directive would lose information for no benefit');
+    assert.ok(cleaned.includes('#endregion'));
+  });
+
+  test('stripComments length, \\n and \\r positions are preserved across CRLF directives', () => {
+    const src = [
+      'codeunit 50100 "T"',
+      '{',
+      '    /* a block',
+      '       comment */',
+      "    #region Don't break",
+      '    #endregion',
+      "    var L: Label 'x /* y';",
+      '    // a line comment',
+      '',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterFoo()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\r\n');
+    const cleaned = stripComments(src);
+    assert.strictEqual(cleaned.length, src.length,
+      'every downstream byte offset and jump-to-source Location depends on this');
+    for (let i = 0; i < src.length; i++) {
+      if (src[i] === '\n' || src[i] === '\r') {
+        assert.strictEqual(cleaned[i], src[i],
+          `line terminator at offset ${i} must be preserved`);
+      }
+    }
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnAfterFoo');
+  });
+
+  test('a mid-line # is not a directive', () => {
+    // Only a line-leading `#` starts a directive; a `#` inside a string stays
+    // inside that string and the string keeps its normal escaping.
+    const src = [
+      'codeunit 50100 "Cu"',
+      '{',
+      '    procedure Show()',
+      '    begin',
+      "        Message('#region x');",
+      '    end;',
+      '',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnAfterBaz()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const cleaned = stripComments(src);
+    assert.ok(cleaned.includes("Message('#region x');"),
+      'the string literal must be preserved verbatim, not treated as directive text');
+    const { publishers } = parseAl(uri, src);
+    assert.strictEqual(publishers.length, 1);
+    assert.strictEqual(publishers[0].eventName, 'OnAfterBaz');
   });
 });
