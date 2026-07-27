@@ -48,7 +48,8 @@ export function activate(context: vscode.ExtensionContext): void {
   register('alEventLens.gotoSubscriber',  (...args) => {
     if (!args[0]) { return; }
     // Args may arrive as a real vscode.Location (from CodeLens / Tree) or as
-    // a plain {uri, range} bag (structured-cloned from a webview message).
+    // a plain {uri, range} bag (JSON-serialized from a webview message — the
+    // hop runs JSON.stringify, which calls each type's toJSON()).
     // Reconstruct both pieces so showTextDocument gets canonical instances.
     const loc = args[0] as { uri: vscode.Uri; range: unknown };
     const uri = vscode.Uri.from(loc.uri);
@@ -74,7 +75,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // the same UI as any other "find references" result. Both arguments come
     // straight from the provider in-process, so they are real vscode types —
     // no revival needed (unlike `gotoSubscriber`, whose payload can arrive
-    // structured-cloned from the webview).
+    // JSON-serialized via toJSON() from the webview).
     const at = args[0] as vscode.Location | undefined;
     const usages = args[1] as vscode.Location[] | undefined;
     if (!at || !usages || usages.length === 0) {

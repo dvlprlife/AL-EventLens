@@ -53,10 +53,13 @@ suite('util/reviveLocation: reviveRange', () => {
   });
 
   test('underscore-prefixed {_start, _end} shape — the internal-slots-only clone', () => {
-    // This is what `postMessage` from a webview produces when vscode.Range's
-    // public `start`/`end` getters get stripped during structured clone and
-    // only the internal _start/_end data properties survive. The regression
-    // this whole helper exists to catch.
+    // vscode.Range's internal `_start`/`_end` data slots (the public
+    // `start`/`end` are prototype getters) carrying plain {line, character}
+    // positions. A defensive hybrid, not what a genuine `structuredClone`
+    // emits — vscode.Position hides its data behind getters too, so a real
+    // clone would nest `{_line, _character}`, which `revivePosition` does not
+    // read. Nothing in production depends on that: the webview hop is
+    // JSON.stringify, covered by the array case below (#185).
     const r = reviveRange({
       _start: { line: 7, character: 4 },
       _end: { line: 7, character: 4 }
@@ -153,6 +156,39 @@ suite('util/reviveLocation: reviveRange', () => {
     assert.strictEqual(r!.start.character, 0);
     assert.strictEqual(r!.end.line, 0);
     assert.strictEqual(r!.end.character, 0);
+  });
+
+  test('array longer than two elements ignores the extras (#185)', () => {
+    // `Range.toJSON()` is [start, end]; anything past index 1 is not part of
+    // the contract, so it is dropped rather than reinterpreted.
+    const r = reviveRange([
+      { line: 1, character: 1 },
+      { line: 2, character: 2 },
+      { line: 9, character: 9 }
+    ]);
+    assert.strictEqual(r.start.line, 1);
+    assert.strictEqual(r.start.character, 1);
+    assert.strictEqual(r.end.line, 2);
+    assert.strictEqual(r.end.character, 2);
+  });
+
+  test('malformed array elements degrade to (0, 0) without throwing (#185)', () => {
+    // Non-object elements fall through revivePosition's typeof guard.
+    let bad: vscode.Range | undefined;
+    assert.doesNotThrow(() => { bad = reviveRange([null, 'x']); });
+    assert.ok(bad);
+    assert.strictEqual(bad!.start.line, 0);
+    assert.strictEqual(bad!.start.character, 0);
+    assert.strictEqual(bad!.end.line, 0);
+    assert.strictEqual(bad!.end.character, 0);
+
+    // A null end is `??`-absent, so it falls back to start — same rule the
+    // object path applies to a missing `end`.
+    const nullEnd = reviveRange([{ line: 3, character: 1 }, null]);
+    assert.strictEqual(nullEnd.start.line, 3);
+    assert.strictEqual(nullEnd.start.character, 1);
+    assert.strictEqual(nullEnd.end.line, 3);
+    assert.strictEqual(nullEnd.end.character, 1);
   });
 
   test('REAL JSON round trip of a vscode.Range revives to the same coordinates (#185)', () => {

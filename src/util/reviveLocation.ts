@@ -10,12 +10,24 @@ import * as vscode from 'vscode';
  * that has crossed that boundary arrives host-side as a two-element **array**:
  * `[{line, character}, {line, character}]` (#185).
  *
- * Three further shapes are tolerated defensively, since a payload can also
- * reach us pre-shaped or structured-cloned rather than JSON-serialized:
- * `{start, end}` (a hand-built or already-JSON-shaped bag), `{_start, _end}`
- * (vscode.Range's internal data slots — the public `start`/`end` are class
- * getters, and accessors are not structured-cloned), and `{}` (nothing
- * useful survived).
+ * Three further shapes are tolerated defensively, for payloads that reach us
+ * pre-shaped rather than across that boundary:
+ *
+ * - `{start, end}` — a hand-built or already-`Range`-shaped bag, e.g. a plain
+ *   object literal an in-process caller assembled itself.
+ * - `{_start, _end}` — vscode.Range's internal data slots (`_start`/`_end`;
+ *   the public `start`/`end` are prototype getters) holding **plain
+ *   `{line, character}`** positions. This is a hybrid belt-and-braces shape,
+ *   *not* genuine `structuredClone` output: vscode.Position hides its data
+ *   behind getters too (`get line() { return this._line; }`), so a real
+ *   `structuredClone` of a Range would produce `{_start: {_line, _character}}`
+ *   — and `revivePosition` below reads `line`/`character`, never `_line`/
+ *   `_character`, so that payload would still collapse to (0, 0). Teaching it
+ *   those slots is a behaviour change, deliberately not made here; nothing in
+ *   production needs it, because the webview hop is `JSON.stringify`, not
+ *   `structuredClone`. (The webview-side `lineOf` in `src/ui/panelHtml.ts`
+ *   does read `_line` — the two halves of this defensive story disagree.)
+ * - `{}` — nothing useful survived.
  *
  * Real in-process callers (CodeLens, Tree, anything dispatched inside the
  * extension host with no postMessage hop) hand us a true `vscode.Range`
@@ -59,8 +71,8 @@ export function reviveRange(input: unknown): vscode.Range {
  * Negative or non-integer coordinates are clamped/floored to a valid value:
  * `vscode.Position`/`Range` throw `illegalArgument` on a negative or
  * non-integer, and `gotoSubscriber` invokes `reviveRange` outside any
- * try/catch, so a malformed structured-cloned payload would otherwise
- * surface a generic error toast instead of this helper's `(0,0)` fallback.
+ * try/catch, so a malformed payload would otherwise surface a generic
+ * error toast instead of this helper's `(0,0)` fallback.
  * `Math.floor` also coerces non-integers; `>= 0` is `false` for `NaN`, so
  * `NaN` falls through to 0.
  */
