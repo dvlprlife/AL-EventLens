@@ -146,9 +146,20 @@ function makeSubscriber(targetName: string, targetEvent: string): Subscriber {
 // out, and evaluate the named helpers the test needs in a controlled scope.
 const PANEL_SCRIPT: string = ((): string => {
   const html = renderPanelHtml('nonce123');
-  const scriptMatch = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(html);
-  assert.ok(scriptMatch, 'inline <script> must be present in the rendered HTML');
-  return scriptMatch![1];
+  // Sliced by index rather than matched with a `<script>…</script>` regex.
+  // This is extraction from our own generated document, not sanitization of
+  // untrusted HTML, and a tag regex trips CodeQL's js/bad-tag-filter — which
+  // is right that no such regex covers every end-tag form a browser accepts
+  // (`</script >`, `</script foo="bar">`, upper case). `renderPanelHtml`
+  // emits exactly one `<script>` element, so indexOf is both simpler and
+  // exact here.
+  const openStart = html.indexOf('<script');
+  assert.ok(openStart !== -1, 'inline <script> must be present in the rendered HTML');
+  const openEnd = html.indexOf('>', openStart);
+  assert.ok(openEnd !== -1, 'the inline <script> open tag must be terminated');
+  const closeStart = html.indexOf('</script', openEnd);
+  assert.ok(closeStart !== -1, 'the inline <script> element must be closed');
+  return html.slice(openEnd + 1, closeStart);
 })();
 
 /**
