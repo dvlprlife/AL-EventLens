@@ -43,6 +43,12 @@ const handlerDeclAttrRe = new RegExp(
  * intact — while a `[HandlerFunctions(...)]` sitting inside a comment is
  * blanked and correctly never matches.
  *
+ * That same verbatim copying is what let an attribute name written *inside* a
+ * string (`Error('Missing [MessageHandler] attribute')`) bind to the following
+ * procedure; `bindAttributes` now anchors every match to the start of its line
+ * (#179). The gate tests the match's opening `[`, which sits outside the
+ * argument literal, so the name list here is unaffected.
+ *
  * AL escapes a quote inside a string by doubling it (`''`), but a handler
  * method name is an identifier and can never contain one, so a non-greedy
  * `[^']*` is exact here.

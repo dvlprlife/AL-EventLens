@@ -405,3 +405,70 @@ codeunit 50101 "Second"
     assert.strictEqual(declarations.length, 0);
   });
 });
+
+suite('al/handlers: attribute inside a string literal (#179)', () => {
+  // `stripComments` copies string literals through verbatim so the
+  // `[HandlerFunctions('A,B')]` name list survives — which also let an attribute
+  // written inside an ordinary string bind to the next procedure.
+  // `bindAttributes` now anchors every match to the start of its line.
+
+  test('a [MessageHandler] inside a string does not declare a handler', () => {
+    // Pre-fix this yielded declarations ["AlsoUnrelated"] — the phantom binds
+    // forward, and both procedures live in the same object so #159's guard
+    // never fires.
+    const { declarations } = parse(`
+codeunit 50100 "T"
+{
+    procedure Unrelated()
+    begin
+        Error('Missing [MessageHandler] attribute');
+    end;
+
+    procedure AlsoUnrelated()
+    begin
+    end;
+}
+`);
+    assert.strictEqual(declarations.length, 0);
+  });
+
+  test('a real handler in the same file is still declared', () => {
+    const { declarations } = parse(`
+codeunit 50100 "T"
+{
+    SubType = Test;
+
+    procedure Unrelated()
+    begin
+        Error('Missing [MessageHandler] attribute');
+    end;
+
+    [ConfirmHandler]
+    procedure Live(Q: Text[1024]; var R: Boolean)
+    begin
+    end;
+}
+`);
+    assert.strictEqual(declarations.length, 1);
+    assert.strictEqual(declarations[0].name, 'Live');
+    assert.strictEqual(declarations[0].handlerKind, 'ConfirmHandler');
+  });
+
+  test("[Test] [HandlerFunctions('X')] on one line still binds", () => {
+    // The acceptance criterion most at risk from reading the anchor rule as a
+    // character class: the prefix `[Test] ` is not whitespace-or-`]` throughout,
+    // but its last non-whitespace character is `]`, so the match binds.
+    const { references } = parse(`
+codeunit 50100 "T"
+{
+    [Test] [HandlerFunctions('ConfirmYes')]
+    procedure TestPostInvoice()
+    begin
+    end;
+}
+`);
+    assert.strictEqual(references.length, 1);
+    assert.strictEqual(references[0].testMethod, 'TestPostInvoice');
+    assert.deepStrictEqual(references[0].handlerNames, ['ConfirmYes']);
+  });
+});
