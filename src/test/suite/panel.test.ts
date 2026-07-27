@@ -770,11 +770,19 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     assert.strictEqual(
       lineOf({ range: [{ line: 11, character: 0 }, { line: 11, character: 4 }] }), 12,
       'the serialized array shape must yield the 1-based start line');
+    assert.strictEqual(
+      lineOf({ range: [{ _line: 11, _character: 0 }, { _line: 11, _character: 4 }] }), 12,
+      'structured-cloned position element in array shape must yield 1-based start line');
+    assert.strictEqual(
+      lineOf({ range: { start: { _line: 8 } } }), 9,
+      'structured-cloned position element in object shape must yield 1-based start line');
     // The pre-existing shapes stay supported.
     assert.strictEqual(lineOf({ range: { start: { line: 4, character: 0 } } }), 5,
       'the plain {start:{line}} shape must still work');
     assert.strictEqual(lineOf({ range: { _start: { _line: 6 } } }), 7,
       'the structured-clone {_start:{_line}} shape must still work');
+    assert.strictEqual(lineOf({ range: { _start: {} } }), 0,
+      'position missing both line and _line yields 0');
     assert.strictEqual(lineOf({}), 0, 'a location with no range yields 0');
     assert.strictEqual(lineOf(null), 0, 'a missing location yields 0');
   });
