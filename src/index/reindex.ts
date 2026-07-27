@@ -1,3 +1,24 @@
+/**
+ * The vscode-aware index runner: progress reporting, last-started-wins
+ * commit ordering, the save-supersession recovery policy, and the three
+ * full-pass entry points (activation, `alEventLens.refresh`, and — via
+ * `folderWatcher.ts` — workspace-folder change).
+ *
+ * **Layering.** This module is the one documented exception to the
+ * layer-discipline rule in `agents/WORKFLOW.md`: it is the only file under
+ * `src/al/`, `src/symbols/`, or `src/index/` permitted to touch
+ * `vscode.window`. (`store.ts` imports `vscode` too, but only for
+ * `EventEmitter`/`Disposable` — it has no user-facing surface, so it is
+ * not an exception to anything.) Both `vscode.window` uses here — the
+ * `withProgress` reporter and the activation pass's `showErrorMessage`
+ * parser-bug toast — are in this file for one reason: `npm run compile`
+ * has esbuild overwrite `dist/extension.js` with a self-contained bundle,
+ * so anything exported from `extension.ts` is unreachable from the test
+ * host without loading a second, module-state-decoupled copy of this
+ * file. Keeping the whole activation/refresh policy in one module under
+ * `src/index/` is what makes it testable at all — see the extraction note
+ * on `runInitialIndex`.
+ */
 import * as vscode from 'vscode';
 import { buildIndex, type EventIndex } from './indexer';
 import type { EventIndexStore } from './store';
@@ -18,6 +39,25 @@ export async function runIndexWithProgress(
 }
 
 /**
+ * Raise the "please file an issue" toast for a parser bug, and only for a
+ * parser bug. `indexer.ts` wraps an exception thrown out of `parseAl` in a
+ * new Error carrying the `[AL EventLens parser bug]` marker prefix
+ * precisely so this check can tell it from a transient I/O failure, which
+ * stays console-only — those are noisy and usually self-heal.
+ *
+ * Shared by the activation pass's own catch and by the detached re-issued
+ * run's catch so a failure surfaces identically whichever of the two it
+ * lands on.
+ */
+function surfaceParserBug(err: unknown): void {
+  if (err instanceof Error && err.message.startsWith('[AL EventLens parser bug]')) {
+    void vscode.window.showErrorMessage(
+      `AL EventLens: parser bug — please file an issue. ${err.message}`
+    );
+  }
+}
+
+/**
  * Monotonic generation counter used to drop late-resolving index runs that
  * have been superseded by a newer one. Every entry to `runIndexAndCommit`
  * increments this; the captured value is compared against `latest` just
@@ -33,15 +73,23 @@ export async function runIndexWithProgress(
 let latestStartedGeneration = 0;
 
 /**
- * Whether the supplied generation token is still the most-recent one
- * issued. Callers that need to commit an alternative result tied to
- * their original run (e.g. the activation path's empty-index fallback
- * on `indexFn` rejection) consult this before touching the store, so a
- * winning newer run is not clobbered by a loser's failure handler.
+ * Monotonic count of `runIndexAndCommit` entries. Distinct from
+ * `latestStartedGeneration`, which `bumpStartedGeneration` (a save's
+ * single-file delta) ALSO bumps. That difference is the whole
+ * discriminator for the re-issue policy: at the moment a run finds itself
+ * superseded, `runSeq === latestRunSeq` means "no newer FULL run exists,
+ * so a save delta bumped past me and the full scan I just built is not
+ * coming back from anywhere" → re-issue. `runSeq !== latestRunSeq` means
+ * "a newer full run took over" → stand down. That test is for the
+ * *existence* of a newer full run, not for its success — see the comment
+ * at the check itself in `runIndexAndCommit` for what that costs.
+ *
+ * Module-scoped for the same reason `latestStartedGeneration` is: there is
+ * exactly one active store per activation, and the activation pass, the
+ * manual refresh, and the folder-change rebuild must all be visible to
+ * each other as "a newer full run".
  */
-export function isLatestGeneration(generation: number): boolean {
-  return generation === latestStartedGeneration;
-}
+let latestRunSeq = 0;
 
 /**
  * Bump the started-generation counter and return the new value. The
@@ -50,6 +98,11 @@ export function isLatestGeneration(generation: number): boolean {
  * token is now stale — is the point. Called by the save watcher after
  * a successful `store.updateFile` so a buildIndex started before the
  * save cannot overwrite the saved-file delta when it finally resolves.
+ *
+ * Deliberately does NOT bump `latestRunSeq` — that omission is
+ * load-bearing. It is what lets a superseded full run tell "a save delta
+ * bumped past me" (re-issue) from "a newer full run bumped past me"
+ * (stand down). See `RunIndexOptions.reissueIfSuperseded`.
  */
 export function bumpStartedGeneration(): number {
   return ++latestStartedGeneration;
@@ -68,6 +121,7 @@ export function bumpStartedGeneration(): number {
  */
 export function resetExtensionStateForReload(): void {
   latestStartedGeneration = 0;
+  latestRunSeq = 0;
 }
 
 /**
@@ -82,6 +136,43 @@ export function resetExtensionStateForReload(): void {
 export interface RunIndexResult {
   readonly index: EventIndex;
   readonly committed: boolean;
+  /**
+   * True only when `committed` is false AND this run responded by
+   * launching exactly one fresh replacement run (see
+   * `RunIndexOptions.reissueIfSuperseded`). Lets callers log "superseded
+   * by a save, re-indexing" separately from "superseded by a newer index
+   * run, discarding" — the two cases have opposite user-visible
+   * consequences and the old single log line conflated them.
+   */
+  readonly reissued: boolean;
+}
+
+/**
+ * Per-run policy knobs for `runIndexAndCommit`.
+ */
+export interface RunIndexOptions {
+  /**
+   * Opt in to the save-supersession recovery policy. When this run's
+   * commit is suppressed by a save's generation bump — and no newer full
+   * run has started, which `latestRunSeq` distinguishes — launch exactly
+   * one fresh run to replace the discarded scan. The re-issued run is
+   * started with this flag OFF, so the worst case is one run + one
+   * re-issue, never a rebuild loop.
+   *
+   * Discarding and re-scanning is correct rather than lossy because
+   * `onDidSaveTextDocument` fires *after* the write lands, so the
+   * re-issued run re-reads the saved file from disk: the delta that
+   * superseded us is re-derived by the replacement scan, not lost.
+   *
+   * The converse — standing down because a newer full run exists — is
+   * only sound when that newer run goes on to commit. If it rejects
+   * instead, this run's discarded scan is not rebuilt by anyone. See the
+   * KNOWN GAP note at the check in `runIndexAndCommit` (issue #195).
+   *
+   * Default `false`, so the primitive's last-started-wins contract is
+   * unchanged for any caller that does not ask for recovery.
+   */
+  readonly reissueIfSuperseded?: boolean;
 }
 
 /**
@@ -89,32 +180,158 @@ export interface RunIndexResult {
  * last-started-wins ordering. Wraps `runIndexWithProgress` (overridable
  * via `indexFn` for tests).
  *
- * Returns the generation token reserved by this call so a caller can
- * gate its own failure-fallback `store.set` by the same counter via
- * `isLatestGeneration(token)` — see the activation path in
- * `extension.ts`. If another caller (or `bumpStartedGeneration`)
- * increments the counter while this run is in flight, the late result
- * is dropped silently — `store.set` is NOT called on the success path
- * and `done` resolves with `committed: false`.
+ * Returns the generation token reserved by this call. Nothing in `src/`
+ * consults it any more: the activation path's empty-index fallback
+ * (`runInitialIndex`, below) gates on `!store.isInitialized` instead,
+ * because gating it on "am I still the latest generation?" is exactly
+ * what left the tree spinning forever when an overlapping refresh also
+ * failed (issue #113, fixed in #119). The token is still returned
+ * because the counter's monotonicity is the contract tests assert on.
+ * If another caller (or `bumpStartedGeneration`) increments the counter
+ * while this run is in flight, the late result is dropped silently —
+ * `store.set` is NOT called on the success path and `done` resolves with
+ * `committed: false`.
  *
  * Errors from `indexFn` propagate to the caller so the existing
  * activation / refresh / folder-change `.catch` paths still log; the
  * generation token is still available because callers reserve it via
  * the synchronous `runIndexAndCommit` entry that returns a `{ done }`
  * promise alongside.
+ *
+ * With `options.reissueIfSuperseded`, a run whose commit was suppressed
+ * by a *save* (rather than by a newer full run) launches exactly one
+ * replacement run before resolving — see `RunIndexOptions`. The re-issue
+ * is deliberately detached: `done` still resolves with THIS run's result,
+ * so callers stay fire-and-forget and the returned `reissued` flag is
+ * what tells them which of the two supersession causes applied. Because
+ * it is detached, no caller catch covers it, so its own catch logs AND
+ * routes a parser bug through `surfaceParserBug` — otherwise a failure
+ * landing on the re-issue instead of the original would lose the toast.
  */
 export function runIndexAndCommit(
   context: vscode.ExtensionContext,
   store: EventIndexStore,
-  indexFn: (ctx: vscode.ExtensionContext) => Promise<EventIndex> = runIndexWithProgress
+  indexFn: (ctx: vscode.ExtensionContext) => Promise<EventIndex> = runIndexWithProgress,
+  options: RunIndexOptions = {}
 ): { generation: number; done: Promise<RunIndexResult> } {
   const generation = ++latestStartedGeneration;
+  const runSeq = ++latestRunSeq;
   const done = indexFn(context).then((index): RunIndexResult => {
     if (generation === latestStartedGeneration) {
       store.set(index);
-      return { index, committed: true };
+      return { index, committed: true, reissued: false };
     }
-    return { index, committed: false };
+    // Superseded. Re-issue only when a save delta — not a newer full run —
+    // is what bumped past us, and only when the caller asked for recovery.
+    // `runSeq === latestRunSeq` is that test: no other full run has entered
+    // since we did, so nothing else is going to rebuild what we just threw
+    // away. The replacement is started WITHOUT the flag, so it can never
+    // arm another: one run + one re-issue, max.
+    //
+    // KNOWN GAP — the stand-down tests only for the *existence* of a newer
+    // full run, never for its outcome. If that newer run's `buildIndex`
+    // rejects (a parser bug or transient I/O — both are handled paths), it
+    // commits nothing, and this run has already discarded the scan it
+    // built: the work is lost until the next save, folder change, or
+    // manual Refresh. The pre-#181 folder-change path re-issued in that
+    // case, because its bespoke counter was bumped only by folder changes;
+    // the save path never did. Closing it needs the counter to record
+    // completion, not just entry, which is a real concurrency change and
+    // this file's concurrency changes have a history (#113/#119) of
+    // costing more than they fix. Tracked as issue #195 rather than
+    // folded in here — do not "simplify" this comment away.
+    if (options.reissueIfSuperseded === true && runSeq === latestRunSeq) {
+      runIndexAndCommit(context, store, indexFn).done
+        .catch((err) => {
+          console.error('AL EventLens: re-issued index run failed', err);
+          // The re-issue is detached, so no caller's catch runs for it.
+          // Without this the activation pass's parser-bug toast would be
+          // silently lost whenever the failure landed on the re-issued run
+          // rather than the original.
+          surfaceParserBug(err);
+        });
+      return { index, committed: false, reissued: true };
+    }
+    return { index, committed: false, reissued: false };
   });
   return { generation, done };
+}
+
+/**
+ * The activation-time full index pass — the body of what used to sit
+ * inline in `extension.ts`'s `activate()`.
+ *
+ * Extracted here (rather than exported from `extension.ts`) so the
+ * save-supersession recovery policy is exercised by tests against the
+ * real production call site: `npm run compile` runs `tsc --outDir dist`
+ * and then esbuild, whose node target overwrites `dist/extension.js` with
+ * a self-contained bundle — a test importing `../../extension` would load
+ * a second copy of this module with its own generation counters, silently
+ * decoupled from the copy the same test drives directly. Issue #181 was
+ * precisely a call site failing to opt into a policy, so the call site
+ * itself has to be what the tests run.
+ *
+ * On failure the store is still marked initialized (with an empty index)
+ * so the tree's `indexing…` placeholder progresses to the real empty-state
+ * message rather than spinning forever — but ONLY if NO commit has landed
+ * yet. The `store.isInitialized` gate covers BOTH commit paths: a
+ * successful `runIndexAndCommit` `store.set` (full pass) AND a successful
+ * `handleSave` `store.updateFile` (a save during a slow failing initial).
+ * If either has fired, the store already holds real data and the empty
+ * fallback would clobber it (issue #119). If BOTH this initial pass AND a
+ * refresh fail with no save in between, `store.isInitialized` stays false
+ * and the fallback still fires so the spinner clears.
+ */
+export async function runInitialIndex(
+  context: vscode.ExtensionContext,
+  store: EventIndexStore,
+  indexFn: (ctx: vscode.ExtensionContext) => Promise<EventIndex> = runIndexWithProgress
+): Promise<void> {
+  try {
+    const { index, committed, reissued } = await runIndexAndCommit(
+      context, store, indexFn, { reissueIfSuperseded: true }
+    ).done;
+    if (committed) {
+      console.log(`AL EventLens: indexed ${index.publishers.length} publishers, ${index.subscribers.length} subscribers`);
+    } else if (reissued) {
+      console.log('AL EventLens: initial index superseded by a file save - re-indexing');
+    } else {
+      console.log('AL EventLens: initial index superseded by a newer index run - discarding this result');
+    }
+  } catch (err) {
+    console.error('AL EventLens: indexing failed', err);
+    surfaceParserBug(err);
+    if (!store.isInitialized) {
+      store.set({ publishers: [], subscribers: [], appMeta: new Map() });
+    }
+  }
+}
+
+/**
+ * The `alEventLens.refresh` command body. Extracted alongside
+ * `runInitialIndex` for the same reason, and opted into the same
+ * save-supersession recovery: Refresh is the user's obvious way to
+ * recover from a bad index, so silently discarding it on an overlapping
+ * autosave is the worst possible place for that hole (issue #181).
+ *
+ * Stays silent on success — the user asked for this and sees the store
+ * update — and logs only failures and the two supersession outcomes.
+ */
+export async function runRefreshIndex(
+  context: vscode.ExtensionContext,
+  store: EventIndexStore,
+  indexFn: (ctx: vscode.ExtensionContext) => Promise<EventIndex> = runIndexWithProgress
+): Promise<void> {
+  try {
+    const { committed, reissued } = await runIndexAndCommit(
+      context, store, indexFn, { reissueIfSuperseded: true }
+    ).done;
+    if (!committed && reissued) {
+      console.log('AL EventLens: refresh superseded by a file save - re-indexing');
+    } else if (!committed) {
+      console.log('AL EventLens: refresh superseded by a newer index run - discarding this result');
+    }
+  } catch (err) {
+    console.error('AL EventLens: refresh failed', err);
+  }
 }
