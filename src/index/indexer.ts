@@ -210,8 +210,8 @@ export async function buildIndex(
         // catch (`surfaceParserBug` in `reindex.ts`) can distinguish
         // parser bugs from transient I/O errors and surface them via
         // `showErrorMessage` — users never see the `console.error`
-        // above. Preserve the original
-        // error as `.cause` so a future inspector still has the stack.
+        // above. Preserve the original error as `.cause` so a future
+        // inspector still has the stack.
         const wrapped = new Error(
           `[AL EventLens parser bug] ${err instanceof Error ? err.message : String(err)} (in ${uri.fsPath})`
         );
