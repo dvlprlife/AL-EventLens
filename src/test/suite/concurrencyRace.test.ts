@@ -2,7 +2,12 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { Publisher, Subscriber } from '../../al/types';
 import type { EventIndex } from '../../index/indexer';
-import { runIndexAndCommit, runInitialIndex, runRefreshIndex } from '../../index/reindex';
+import {
+  resetExtensionStateForReload,
+  runIndexAndCommit,
+  runInitialIndex,
+  runRefreshIndex
+} from '../../index/reindex';
 import { EventIndexStore } from '../../index/store';
 import { handleSave } from '../../index/watcher';
 import * as appJson from '../../index/appJson';
@@ -859,10 +864,16 @@ suite('index/reindex: save-supersession re-issue (issue #181)', () => {
     }
   });
 
-  test('the superseded log names its cause: a file save (re-indexing) vs a newer run (discarding)', async () => {
+  test('the superseded log names its consequence: re-indexing vs discarding', async () => {
     // Issue #181's second half: the old line read "initial build
     // superseded - using newer index" in BOTH cases, which was actively
     // misleading — on the save path no newer index existed at all.
+    //
+    // The line names the CONSEQUENCE, not the cause. It said "a file save"
+    // until #195 gave `reissued: true` a second cause (a superseding run
+    // that failed), which would have made that wording newly false — the
+    // same defect #181 was filed about. The assertions below are unchanged;
+    // only this title and the wording under test moved to be cause-neutral.
     patchConfig({});
     patchDiscoverApps(async () => []);
     const originalConsoleLog = console.log;
@@ -995,56 +1006,290 @@ suite('index/reindex: save-supersession re-issue (issue #181)', () => {
     }
   });
 
-  test('CHARACTERIZATION: a run superseded by a newer full run that then FAILS is dropped, not re-issued', async () => {
-    // Not an assertion that this is desirable — it documents the KNOWN GAP
-    // recorded at the `runSeq === latestRunSeq` check in `reindex.ts`, so
-    // the gap is verifiable rather than a comment claim, and so whoever
-    // closes it has to come here and flip this deliberately.
+  test('a run superseded by a newer full run that then FAILS re-issues exactly once (issue #195)', async () => {
+    // ORDERING (i) of issue #195: the superseding run rejects BEFORE the
+    // superseded run resolves, so the superseded run is still in flight
+    // and can observe the failure at its own resolution point. The mirror
+    // ordering — the superseded run stands down first and the superseder
+    // fails afterwards — is the test immediately below. A one-sided fix
+    // passes one and fails the other, so both are pinned here.
     //
-    // The stand-down tests only for the EXISTENCE of a newer full run,
-    // never for its outcome. When that newer run rejects it commits
-    // nothing, and the superseded run has already thrown its own scan
-    // away: neither result reaches the store. Tracked as its own issue —
-    // narrowing the guard means making the counter record completion
-    // rather than entry, which is a real concurrency change, and this
-    // module's concurrency changes have a history (#113/#119).
+    // This test began life as a CHARACTERIZATION of the KNOWN GAP left by
+    // PR #192: the stand-down tested only for the EXISTENCE of a newer
+    // full run, never for its outcome, so when that run rejected it
+    // committed nothing and the superseded run had already thrown its own
+    // scan away — neither result reached the store, and nothing rebuilt
+    // it until the next save, folder change, or manual Refresh. Closing
+    // #195 flipped it deliberately; it is now the regression test.
     patchConfig({});
     patchDiscoverApps(async () => []);
     const store = new EventIndexStore();
     try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
       let calls = 0;
-      const dFirst = deferred<EventIndex>();
-      const dNewer = deferred<EventIndex>();
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
 
       // Run A opts into recovery (as all three production callers do).
       const first = runIndexAndCommit(
-        fakeContext(), store, () => { calls++; return dFirst.promise; },
-        { reissueIfSuperseded: true }
+        fakeContext(), store, indexFn, { reissueIfSuperseded: true }
       );
       // Run B is a newer full run — it bumps BOTH counters past A.
-      const newer = runIndexAndCommit(
-        fakeContext(), store, () => { calls++; return dNewer.promise; }
-      );
+      const newer = runIndexAndCommit(fakeContext(), store, indexFn);
       await flush();
       assert.strictEqual(calls, 2, 'both runs started');
 
       // B fails. Nothing commits from it.
-      dNewer.reject(new Error('synthetic buildIndex failure'));
-      await assert.rejects(newer.done, /synthetic buildIndex failure/);
+      deferreds[1].reject(new Error('synthetic buildIndex failure'));
+      await assert.rejects(newer.done, /synthetic buildIndex failure/,
+        'the rejection must still propagate to B\'s caller unchanged');
 
-      // A now resolves and finds itself superseded by B.
-      dFirst.resolve(makeIndex('discarded-by-a-run-that-failed'));
+      // A now resolves and finds itself superseded by a run that has
+      // ALREADY failed, with nothing newer behind it.
+      deferreds[0].resolve(makeIndex('discarded-by-a-run-that-failed'));
       const firstResult = await first.done;
       await flush();
 
       assert.strictEqual(firstResult.committed, false,
+        'the superseded run still does not commit its own stale scan');
+      assert.strictEqual(firstResult.reissued, true,
+        'nobody else is left to rebuild the discarded scan, so this run re-issues');
+      assert.strictEqual(calls, 3,
+        'exactly one replacement run is started — never more');
+
+      // The replacement owns the newest generation, so it commits: the
+      // discarded scan really is rebuilt rather than lost.
+      const rebuilt = makeFullIndex();
+      deferreds[2].resolve(rebuilt);
+      await flush();
+
+      assert.strictEqual(store.get(), rebuilt,
+        'the re-issued run must commit the rebuilt full index');
+      assert.strictEqual(store.isInitialized, true,
+        'the store is no longer left empty by a superseder that failed');
+      assert.strictEqual(calls, 3,
+        'the replacement carries the flag OFF, so it arms nothing further');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a run superseded by a newer full run that fails LATER re-issues exactly once (issue #195)', async () => {
+    // ORDERING (ii) — the sequence in issue #195's body. The superseded
+    // run F resolves and stands down FIRST, so it is already gone by the
+    // time the superseding run R rejects and cannot observe the failure
+    // itself. F therefore hands the rebuild off (re-issuing here instead
+    // would race a run that may still be about to commit — the #113/#119
+    // bug class) and R discharges that debt when it rejects.
+    //
+    // The replacement is started by R, so in production it re-runs R's
+    // `indexFn`. That is identical work: all three callers pass
+    // `runIndexWithProgress`, the same full workspace scan reading
+    // `workspaceFolders` at call time. Both runs share one `indexFn` here
+    // so the replacement is visible in the same call count either way.
+    const store = new EventIndexStore();
+    try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      let calls = 0;
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      const superseded = runIndexAndCommit(
+        fakeContext(), store, indexFn, { reissueIfSuperseded: true }
+      );
+      const superseder = runIndexAndCommit(fakeContext(), store, indexFn);
+      await flush();
+      assert.strictEqual(calls, 2, 'both runs started');
+
+      // F resolves first. A newer full run exists and is still in flight,
+      // so F stands down and hands the rebuild off.
+      deferreds[0].resolve(makeIndex('discarded-first'));
+      const supersededResult = await superseded.done;
+      await flush();
+      assert.strictEqual(supersededResult.committed, false,
         'the superseded run does not commit');
-      assert.strictEqual(firstResult.reissued, false,
-        'current behaviour: it stands down rather than re-issuing, because a newer full run EXISTED — regardless of that run having failed');
+      assert.strictEqual(supersededResult.reissued, false,
+        'it hands the rebuild off rather than launching one itself');
       assert.strictEqual(calls, 2,
-        'current behaviour: no third run is started, so nothing rebuilds the discarded scan');
+        'the hand-off starts nothing by itself');
+
+      // R now rejects with nothing newer behind it, so the debt stops
+      // here and R re-issues on the superseded run's behalf.
+      deferreds[1].reject(new Error('synthetic buildIndex failure'));
+      await assert.rejects(superseder.done, /synthetic buildIndex failure/,
+        'the rejection must still propagate to its own caller unchanged');
+      await flush();
+      assert.strictEqual(calls, 3,
+        'the failing superseder must re-issue exactly one replacement scan');
+
+      const rebuilt = makeFullIndex();
+      deferreds[2].resolve(rebuilt);
+      await flush();
+
+      assert.strictEqual(store.get(), rebuilt,
+        'the replacement commits the rebuilt full index');
+      assert.strictEqual(store.isInitialized, true,
+        'the store is no longer left empty in this ordering either');
+      assert.strictEqual(calls, 3,
+        'the replacement carries the flag OFF, so it arms nothing further');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a replacement started by a failing superseder that itself fails does not start a third run', async () => {
+    // AC 4 — the rebuild-loop bound on the hand-off path. The debt is
+    // cleared BEFORE the replacement starts, and the replacement carries
+    // the flag off (so it can neither take a re-issue branch nor record a
+    // debt of its own): its rejection finds nothing owed and stops.
+    const store = new EventIndexStore();
+    try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      let calls = 0;
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      const superseded = runIndexAndCommit(
+        fakeContext(), store, indexFn, { reissueIfSuperseded: true }
+      );
+      const superseder = runIndexAndCommit(fakeContext(), store, indexFn);
+      await flush();
+
+      // Hand off, then discharge the debt by rejecting the superseder.
+      deferreds[0].resolve(makeIndex('discarded-first'));
+      await superseded.done;
+      await flush();
+      deferreds[1].reject(new Error('superseder failed'));
+      await assert.rejects(superseder.done, /superseder failed/);
+      await flush();
+      assert.strictEqual(calls, 3, 'the debt produced exactly one replacement');
+
+      // The replacement fails too. Its rejection is detached (nothing
+      // awaits it but `startReissue`'s own catch), and it must not start
+      // yet another run.
+      deferreds[2].reject(new Error('replacement also failed'));
+      await flush();
+      await flush();
+
+      assert.strictEqual(calls, 3,
+        'each debt discharges exactly once — a failing replacement must NOT start a third run');
       assert.strictEqual(store.isInitialized, false,
-        'neither run reached the store');
+        'nothing committed, but nothing looped either');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a superseded run whose superseder COMMITTED leaves no debt behind', async () => {
+    // AC 2, and the whole reason `latestCommittedRunSeq` exists. When the
+    // newer full run has already committed, its scan supersedes the
+    // discarded one and nothing is owed. Recording a debt here anyway
+    // would make it permanently sticky, so the next unrelated failure —
+    // arbitrarily far in the future — would fire a spurious full rebuild.
+    // The existing AC 2 tests cannot catch that: they assert the absence
+    // of an *immediate* re-issue, which a sticky debt does not cause.
+    const store = new EventIndexStore();
+    try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      let calls = 0;
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      const superseded = runIndexAndCommit(
+        fakeContext(), store, indexFn, { reissueIfSuperseded: true }
+      );
+      const superseder = runIndexAndCommit(fakeContext(), store, indexFn);
+      await flush();
+      assert.strictEqual(calls, 2, 'both runs started');
+
+      // The newer full run commits.
+      const committedIndex = makeIndex('superseder');
+      deferreds[1].resolve(committedIndex);
+      const supersederResult = await superseder.done;
+      assert.strictEqual(supersederResult.committed, true,
+        'the newer full run owns the latest generation, so it commits');
+
+      // The superseded run stands down with nothing owed.
+      deferreds[0].resolve(makeIndex('discarded'));
+      const supersededResult = await superseded.done;
+      await flush();
+      assert.strictEqual(supersededResult.reissued, false,
+        'a run whose superseder already committed must not re-issue');
+      assert.strictEqual(calls, 2, 'no replacement is started');
+
+      // An unrelated later run fails. With no debt outstanding, its
+      // rejection must start nothing at all.
+      const later = runIndexAndCommit(fakeContext(), store, indexFn);
+      await flush();
+      assert.strictEqual(calls, 3, 'the unrelated run is the third indexFn call');
+
+      deferreds[2].reject(new Error('unrelated failure'));
+      await assert.rejects(later.done, /unrelated failure/);
+      await flush();
+
+      assert.strictEqual(calls, 3,
+        'a failure with no outstanding debt must not start a rebuild');
+      assert.strictEqual(store.get(), committedIndex,
+        'the store still holds the scan the superseder committed');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a run that entered before resetExtensionStateForReload does not re-issue after it', async () => {
+    // The post-reset trap. `resetExtensionStateForReload` zeroes every
+    // counter, which makes `latestFailedRunSeq === latestRunSeq`
+    // vacuously true (0 === 0) — so without the `runSeq > latestRunSeq`
+    // early return, a run that entered BEFORE the reset would fire a
+    // rebuild against a store `deactivate()` has already disposed.
+    // Because the counter is monotonic otherwise, `runSeq > latestRunSeq`
+    // is an exact test for "a reset happened under me".
+    //
+    // Placed LAST in this suite deliberately: it zeroes module state that
+    // every other test in the process shares, so it must leave nothing in
+    // flight behind it.
+    const store = new EventIndexStore();
+    try {
+      let calls = 0;
+      const d = deferred<EventIndex>();
+      const run = runIndexAndCommit(
+        fakeContext(), store,
+        () => { calls++; return d.promise; },
+        { reissueIfSuperseded: true }
+      );
+      await flush();
+      assert.strictEqual(calls, 1, 'one run in flight across the reset');
+
+      // `deactivate()` — the module's counters go back to zero.
+      resetExtensionStateForReload();
+
+      d.resolve(makeIndex('pre-reset'));
+      const result = await run.done;
+      await flush();
+
+      assert.strictEqual(result.committed, false,
+        'a pre-reset run must not commit into the next activation');
+      assert.strictEqual(result.reissued, false,
+        'and must not fire a rebuild against a disposed store');
+      assert.strictEqual(calls, 1, 'no replacement run is started');
+      assert.strictEqual(store.isInitialized, false,
+        'nothing reached the store');
     } finally {
       store.dispose();
     }
