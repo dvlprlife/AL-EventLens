@@ -5,11 +5,22 @@ import type { EventIndex } from '../../index/indexer';
 import { EventIndexStore } from '../../index/store';
 import { getSelectedPublisher, openPanel, postRevealObjectToPanel, postRevealSubscriberToPanel, postSelectToPanel } from '../../ui/panel';
 import { renderPanelHtml } from '../../ui/panelHtml';
+import { SubscriberTreeDataProvider, type SubTreeNode } from '../../ui/subscriberTreeView';
 
 // ─── Fake WebviewPanel ───────────────────────────────────────────────────
 
 class FakePanel {
   public posts: unknown[] = [];
+  /**
+   * Same payloads as `posts`, round-tripped through JSON — the shape the real
+   * webview receives. `Webview.postMessage` serializes via `JSON.stringify`,
+   * so `Uri.toJSON` / `Range.toJSON` run: a `Uri`'s `fsPath` appears only when
+   * its lazy `_fsPath` slot was already warm, and a `Range` arrives as the
+   * two-element array `[start, end]`. Assert against this whenever the test
+   * cares about the webview's view of a payload; `posts` keeps the live
+   * objects so host-side forwarding identity can still be asserted.
+   */
+  public serializedPosts: unknown[] = [];
   public revealCalls = 0;
   public receivedHandlers: Array<(msg: unknown) => void> = [];
   public disposeHandlers: Array<() => void> = [];
@@ -21,6 +32,7 @@ class FakePanel {
       html: '',
       postMessage: (msg: unknown): Thenable<boolean> => {
         self.posts.push(msg);
+        self.serializedPosts.push(JSON.parse(JSON.stringify(msg)));
         return Promise.resolve(true);
       },
       onDidReceiveMessage: (handler: (msg: unknown) => void): vscode.Disposable => {
@@ -125,6 +137,96 @@ function makeSubscriber(targetName: string, targetEvent: string): Subscriber {
     location: new vscode.Location(vscode.Uri.parse('file:///x.al'), new vscode.Position(0, 0)),
     resolved: true
   };
+}
+
+// ─── Webview-script harness ─────────────────────────────────────────────
+
+// The panel's behavior lives as plain JS inside a TS string literal, so the
+// only way to exercise it is to render the HTML, pull the inline <script>
+// out, and evaluate the named helpers the test needs in a controlled scope.
+const PANEL_SCRIPT: string = ((): string => {
+  const html = renderPanelHtml('nonce123');
+  const scriptMatch = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(html);
+  assert.ok(scriptMatch, 'inline <script> must be present in the rendered HTML');
+  return scriptMatch![1];
+})();
+
+/**
+ * Pluck a named function declaration out of the panel script. Extraction is by
+ * brace-counting rather than regex since the bodies contain nested `{}` (e.g.
+ * for-loops inside `relocateSelectedSubKey`); string literals are skipped so a
+ * `}` inside one cannot unbalance the count.
+ */
+function extractFn(name: string): string {
+  const script = PANEL_SCRIPT;
+  const sig = 'function ' + name + '(';
+  const start = script.indexOf(sig);
+  assert.ok(start !== -1, `helper ${name} must be defined in the panel script`);
+  // Walk forward to the opening brace of the function body.
+  let i = script.indexOf('{', start);
+  assert.ok(i !== -1, `helper ${name} must have an opening brace`);
+  let depth = 1;
+  i++;
+  while (i < script.length && depth > 0) {
+    const ch = script[i];
+    if (ch === '{') {
+      depth++;
+    } else if (ch === '}') {
+      depth--;
+    } else if (ch === "'" || ch === '"') {
+      // Skip string literals so a `}` inside a string doesn't unbalance.
+      const quote = ch;
+      i++;
+      while (i < script.length && script[i] !== quote) {
+        if (script[i] === '\\') {
+          i++; // skip escape
+        }
+        i++;
+      }
+    }
+    i++;
+  }
+  assert.ok(depth === 0, `helper ${name} body must be balanced`);
+  return script.slice(start, i);
+}
+
+/** The webview's `subKey` / `subIdentityKey`, evaluated exactly as it defines them. */
+function makeKeyFns(): {
+  subKey: (s: unknown) => string;
+  subIdentityKey: (s: unknown) => string;
+} {
+  const factory = new Function(
+    `${extractFn('pathOf')}
+     ${extractFn('lineOf')}
+     ${extractFn('subKey')}
+     ${extractFn('subIdentityKey')}
+     return { subKey: subKey, subIdentityKey: subIdentityKey };`
+  ) as () => { subKey: (s: unknown) => string; subIdentityKey: (s: unknown) => string };
+  return factory();
+}
+
+/**
+ * Drive `relocateSelectedSubKey` over a post-save `subscribers` array, in a
+ * scope mirroring the webview's own let-bindings.
+ */
+function makeRelocateDriver(): (
+  subs: unknown[],
+  selectedSubKeyIn: string | null
+) => { selectedSubKey: string | null; subKeyOf: string | null } {
+  return new Function(
+    'subscribers',
+    'selectedSubKeyIn',
+    `let selectedSubKey = selectedSubKeyIn;
+       let subscribersBySubKey = new Map();
+       ${extractFn('pathOf')}
+       ${extractFn('lineOf')}
+       ${extractFn('subKey')}
+       ${extractFn('subIdentityKey')}
+       subscribers.forEach(function (s) { subscribersBySubKey.set(subKey(s), s); });
+       ${extractFn('relocateSelectedSubKey')}
+       relocateSelectedSubKey();
+       return { selectedSubKey: selectedSubKey, subKeyOf: subscribers.length ? subKey(subscribers[0]) : null };`
+  ) as (subs: unknown[], k: string | null) => { selectedSubKey: string | null; subKeyOf: string | null };
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────
@@ -399,68 +501,8 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     // This test exercises the actual webview helpers by extracting them
     // from the rendered HTML and evaluating them in a controlled scope.
 
-    const html = renderPanelHtml('nonce123');
-    const scriptMatch = /<script\b[^>]*>([\s\S]*?)<\/script>/.exec(html);
-    assert.ok(scriptMatch, 'inline <script> must be present in the rendered HTML');
-    const script = scriptMatch![1];
-
-    // Pluck the helper definitions we need. They live as named function
-    // declarations in the inline JS; extract by brace-counting since the
-    // bodies contain nested `{}` (e.g. for-loops inside relocate).
-    function extractFn(name: string): string {
-      const sig = 'function ' + name + '(';
-      const start = script.indexOf(sig);
-      assert.ok(start !== -1, `helper ${name} must be defined in the panel script`);
-      // Walk forward to the opening brace of the function body.
-      let i = script.indexOf('{', start);
-      assert.ok(i !== -1, `helper ${name} must have an opening brace`);
-      let depth = 1;
-      i++;
-      while (i < script.length && depth > 0) {
-        const ch = script[i];
-        if (ch === '{') {
-          depth++;
-        } else if (ch === '}') {
-          depth--;
-        } else if (ch === "'" || ch === '"') {
-          // Skip string literals so a `}` inside a string doesn't unbalance.
-          const quote = ch;
-          i++;
-          while (i < script.length && script[i] !== quote) {
-            if (script[i] === '\\') {
-              i++; // skip escape
-            }
-            i++;
-          }
-        }
-        i++;
-      }
-      assert.ok(depth === 0, `helper ${name} body must be balanced`);
-      return script.slice(start, i);
-    }
-    const fnSubKey = extractFn('subKey');
-    const fnSubIdentityKey = extractFn('subIdentityKey');
-    const fnPathOf = extractFn('pathOf');
-    const fnLineOf = extractFn('lineOf');
-    const fnRelocate = extractFn('relocateSelectedSubKey');
-
-    // Build a controlled scope mirroring the webview's let-bindings. The
-    // Function ctor returns a callable that lets the test drive
-    // relocateSelectedSubKey via shared closure variables.
-    const driver = new Function(
-      'subscribers',
-      'selectedSubKeyIn',
-      `let selectedSubKey = selectedSubKeyIn;
-       let subscribersBySubKey = new Map();
-       ${fnPathOf}
-       ${fnLineOf}
-       ${fnSubKey}
-       ${fnSubIdentityKey}
-       subscribers.forEach(function (s) { subscribersBySubKey.set(subKey(s), s); });
-       ${fnRelocate}
-       relocateSelectedSubKey();
-       return { selectedSubKey: selectedSubKey, subKeyOf: subscribers.length ? subKey(subscribers[0]) : null };`
-    ) as (subs: unknown[], k: string | null) => { selectedSubKey: string | null; subKeyOf: string | null };
+    const driver = makeRelocateDriver();
+    const { subKey } = makeKeyFns();
 
     // A subscriber on a path containing '|'. The line shifts from 10 to 20
     // (simulating an upstream edit that pushed the [EventSubscriber]
@@ -487,10 +529,10 @@ suite('ui/panelHtml: renderPanelHtml', () => {
         range: { start: { line: 9, character: 0 } } // lineOf = 10
       }
     };
-    const staleKey = (new Function('s', `${fnPathOf}\n${fnLineOf}\n${fnSubKey}\nreturn subKey(s);`) as (s: unknown) => string)(staleSub);
+    const staleKey = subKey(staleSub);
 
     // Sanity: the stale key must not match the post-save subKey (different lines).
-    const freshKey = (new Function('s', `${fnPathOf}\n${fnLineOf}\n${fnSubKey}\nreturn subKey(s);`) as (s: unknown) => string)(baseSub);
+    const freshKey = subKey(baseSub);
     assert.notStrictEqual(staleKey, freshKey,
       'precondition: a line-shifting save must change the subKey');
 
@@ -499,6 +541,166 @@ suite('ui/panelHtml: renderPanelHtml', () => {
     const result = driver([baseSub], staleKey);
     assert.strictEqual(result.selectedSubKey, freshKey,
       'relocateSelectedSubKey must recover the post-save subKey even when the path contains "|"');
+  });
+
+  test('subKey / subIdentityKey are identical whether or not the serialized Uri carries fsPath (issue #183)', () => {
+    // `Uri.toJSON()` emits `fsPath` ONLY when the lazy `_fsPath` slot has
+    // already been computed on that instance; `path` and `scheme` are always
+    // emitted. The store hands one shared `Uri` instance to every consumer, and
+    // `subscriberTreeView.ts` reads `loc.uri.fsPath` for a leaf tooltip — so the
+    // very same subscriber serializes without `fsPath` in the `index` message
+    // posted on panel open, and WITH it in a later `revealSubscriber` message.
+    // Keying on `fsPath` therefore produced two different keys for one row and
+    // Reveal Subscriber selected nothing.
+    //
+    // The two bags below are hand-written with a HARDCODED divergent `fsPath`
+    // rather than derived from a real `vscode.Uri.fsPath`, deliberately:
+    // `uriToFsPath` flips `/`→`\` and strips the leading slash only when
+    // `isWindows`, so on Linux/macOS `fsPath === path` byte-for-byte and a
+    // derived fixture would pass against the buggy code on two of the three CI
+    // legs. Same portability trap documented at subscriberTreeView.test.ts:181.
+    const { subKey, subIdentityKey } = makeKeyFns();
+
+    const range = [{ line: 11, character: 0 }, { line: 11, character: 0 }];
+    const identity = {
+      owner: { kind: 'codeunit', name: 'My Sub' },
+      target: { kind: 'codeunit', name: 'Sales-Post' },
+      targetEvent: 'OnAfterPostSalesDoc',
+      resolved: true
+    };
+    // Cold: nothing had touched `.fsPath` before this message was serialized.
+    const cold = {
+      ...identity,
+      location: { uri: { $mid: 1, path: '/c:/ws/src/Foo.al', scheme: 'file' }, range }
+    };
+    // Warm: the Subscribers tree rendered a leaf tooltip first, so `_fsPath`
+    // was populated on the shared instance and `toJSON` emitted it too.
+    const warm = {
+      ...identity,
+      location: {
+        uri: {
+          $mid: 1,
+          fsPath: 'c:\\ws\\src\\Foo.al',
+          _sep: 1,
+          path: '/c:/ws/src/Foo.al',
+          scheme: 'file'
+        },
+        range
+      }
+    };
+
+    // Precondition: the fixture really does model a divergent pair — true on
+    // every platform because both strings are literals, not derived.
+    assert.notStrictEqual(warm.location.uri.fsPath, warm.location.uri.path,
+      'fixture precondition: the warm bag must carry an fsPath that differs from path');
+
+    assert.strictEqual(subKey(cold), subKey(warm),
+      'subKey must not change depending on whether the serialized Uri carried fsPath');
+    assert.strictEqual(subIdentityKey(cold), subIdentityKey(warm),
+      'subIdentityKey must not change depending on whether the serialized Uri carried fsPath');
+    // And it must be the stable component that survives — `uri.path`, which is
+    // byte-identical on Windows, Linux and macOS.
+    assert.ok(subKey(cold).includes('/c:/ws/src/Foo.al'),
+      `keys must be built from uri.path; got: ${JSON.stringify(subKey(cold))}`);
+    assert.ok(!subKey(cold).includes('\\'),
+      'keys must never contain a backslash-mangled fsPath component');
+  });
+
+  test('a fileUpdate relocates the selection even when the post-save payload serialized WITH fsPath (issue #183)', () => {
+    // AC 3: the selection was computed from a cold (`fsPath`-less) `index`
+    // payload; the post-save `fileUpdate` arrives after the tree warmed
+    // `_fsPath`, so its entry carries the backslash form. Keyed on `fsPath` the
+    // relocator's `subIdentityKey` comparison could never match and the
+    // detail pane silently reset to "Select a subscriber."
+    // Hand-built fixtures — platform-independent by construction.
+    const driver = makeRelocateDriver();
+    const { subKey } = makeKeyFns();
+
+    const identity = {
+      owner: { kind: 'codeunit', name: 'My Sub' },
+      target: { kind: 'codeunit', name: 'Sales-Post' },
+      targetEvent: 'OnAfterPostSalesDoc',
+      resolved: true
+    };
+    const coldUri = { $mid: 1, path: '/c:/ws/src/Foo.al', scheme: 'file' };
+    const warmUri = {
+      $mid: 1, fsPath: 'c:\\ws\\src\\Foo.al', _sep: 1, path: '/c:/ws/src/Foo.al', scheme: 'file'
+    };
+    // Selected at line 10, from the cold `index` payload.
+    const selectedCold = {
+      ...identity,
+      location: { uri: coldUri, range: [{ line: 9, character: 0 }, { line: 9, character: 0 }] }
+    };
+    // Same subscriber after a line-shifting save, from the warm `fileUpdate`.
+    const freshWarm = {
+      ...identity,
+      location: { uri: warmUri, range: [{ line: 19, character: 0 }, { line: 19, character: 0 }] }
+    };
+
+    const staleKey = subKey(selectedCold);
+    const freshKey = subKey(freshWarm);
+    assert.notStrictEqual(staleKey, freshKey,
+      'precondition: a line-shifting save must change the subKey');
+
+    const result = driver([freshWarm], staleKey);
+    assert.strictEqual(result.selectedSubKey, freshKey,
+      'relocateSelectedSubKey must recover the selection across a cold→warm serialization flip');
+  });
+
+  test('displayPathOf derives a native-looking path from uri.path alone, honoring the al-eventlens-app: guard (issue #183)', () => {
+    // Keys are now `uri.path`-only, so display can no longer read `fsPath`
+    // either — it is present in only some payloads. `displayPathOf` reproduces
+    // what `Uri.fsPath` would have shown for the one case where the two differ
+    // (a Windows drive-letter path on a `file:` URI), deterministically, so the
+    // panel's path column stops flipping between the two forms.
+    const displayPathOf = new Function(
+      'loc',
+      `${extractFn('pathOf')}
+       ${extractFn('displayPathOf')}
+       return displayPathOf(loc);`
+    ) as (loc: unknown) => string | null;
+
+    assert.strictEqual(
+      displayPathOf({ uri: { scheme: 'file', path: '/c:/ws/src/Foo.al' } }),
+      'c:\\ws\\src\\Foo.al',
+      'a file: drive-letter path must render in native Windows form');
+    assert.strictEqual(
+      displayPathOf({ uri: { scheme: 'file', path: '/home/u/Foo.al' } }),
+      '/home/u/Foo.al',
+      'a POSIX file: path must render unchanged');
+
+    // #132: subscribers parsed from a packaged .app carry the synthetic
+    // `al-eventlens-app:` scheme; its path must stay clean forward-slash.
+    const synthetic = displayPathOf({
+      uri: { scheme: 'al-eventlens-app', path: '/Some.AppId/src/Foo.al' }
+    });
+    assert.strictEqual(synthetic, '/Some.AppId/src/Foo.al',
+      'the synthetic scheme must keep its clean forward-slash path');
+    assert.ok(!synthetic!.includes('\\'),
+      'the synthetic scheme must never be backslash-mangled');
+
+    assert.strictEqual(displayPathOf(null), null,
+      'a missing location must yield null, matching pathOf');
+  });
+
+  test('lineOf reads the two-element array shape that Range.toJSON actually produces (issue #183)', () => {
+    // `Range.toJSON()` returns `[start, end]`, so a real postMessage payload
+    // has neither `.start` nor `._start` — `lineOf` returned 0 for every row in
+    // the shipped product (paths read `:0`, and subKey's line component was a
+    // constant, which also made relocateSelectedSubKey a no-op).
+    const lineOf = new Function('loc', `${extractFn('lineOf')}\nreturn lineOf(loc);`) as
+      (loc: unknown) => number;
+
+    assert.strictEqual(
+      lineOf({ range: [{ line: 11, character: 0 }, { line: 11, character: 4 }] }), 12,
+      'the serialized array shape must yield the 1-based start line');
+    // The pre-existing shapes stay supported.
+    assert.strictEqual(lineOf({ range: { start: { line: 4, character: 0 } } }), 5,
+      'the plain {start:{line}} shape must still work');
+    assert.strictEqual(lineOf({ range: { _start: { _line: 6 } } }), 7,
+      'the structured-clone {_start:{_line}} shape must still work');
+    assert.strictEqual(lineOf({}), 0, 'a location with no range yields 0');
+    assert.strictEqual(lineOf(null), 0, 'a missing location yields 0');
   });
 
   test('applyToken clears objectIdentity when the app dropdown changes, not just the kind dropdown (defect 4)', () => {
@@ -873,6 +1075,80 @@ suite('ui/panel: openPanel singleton + store wiring', () => {
       assert.strictEqual(last.type, 'revealSubscriber');
       assert.strictEqual(last.subscriber, sub,
         'subscriber payload must be the exact object passed in');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('the index and revealSubscriber payloads key to the same row after the tree warms Uri._fsPath (issue #183, AC 1)', () => {
+    // End-to-end reproduction, in the order a user hits it:
+    //   1. panel opens  → `index` posted while `_fsPath` is still cold
+    //   2. Subscribers tree renders a leaf tooltip → reads `loc.uri.fsPath`,
+    //      populating the lazy slot on the shared Uri instance
+    //   3. leaf click    → `revealSubscriber` posted, now WITH `fsPath`
+    // Both payloads must produce the same `subKey` or the reveal handler's
+    // `subscribersBySubKey` lookup misses and the panel selects nothing.
+    //
+    // NOTE: this scenario is tautological on Linux/macOS — `uriToFsPath` only
+    // diverges from `path` when `isWindows`, so the two payloads are identical
+    // there regardless of the fix. The portable guard is the hand-built
+    // fixture test in the renderPanelHtml suite above; this one proves the
+    // real host wiring reaches that state on Windows.
+    patchCreate();
+    const store = new EventIndexStore();
+    try {
+      const sub: Subscriber = {
+        owner: { kind: 'codeunit', name: 'My Sub' },
+        target: { kind: 'codeunit', name: 'Sales-Post' },
+        targetEvent: 'OnAfterPostSalesDoc',
+        // Fresh instance, never read through `.fsPath` by this test before the
+        // tree does — that is the whole point.
+        location: new vscode.Location(
+          vscode.Uri.parse('file:///c:/ws/src/Foo.al'),
+          new vscode.Position(11, 0)
+        ),
+        resolved: true
+      };
+      store.set({ publishers: [], subscribers: [sub], appMeta: new Map() });
+
+      openPanel(fakeContext, store);
+      const fake = createCalls[0];
+      const indexPost = fake.serializedPosts[0] as { type: string; subscribers: unknown[] };
+      assert.strictEqual(indexPost.type, 'index');
+      assert.strictEqual(indexPost.subscribers.length, 1);
+
+      // Render the tree leaf — `getTreeItem` builds the tooltip from
+      // `loc.uri.fsPath`, warming `_fsPath` on the shared Uri instance.
+      const provider = new SubscriberTreeDataProvider(store);
+      const [appNode] = provider.getChildren() as SubTreeNode[];
+      const [kindNode] = provider.getChildren(appNode) as SubTreeNode[];
+      const [objectNode] = provider.getChildren(kindNode) as SubTreeNode[];
+      const [leaf] = provider.getChildren(objectNode) as SubTreeNode[];
+      provider.getTreeItem(leaf);
+
+      postRevealSubscriberToPanel(sub);
+      const revealPost = fake.serializedPosts[fake.serializedPosts.length - 1] as {
+        type: string;
+        subscriber: { location: { uri: { fsPath?: string; path: string } } };
+      };
+      assert.strictEqual(revealPost.type, 'revealSubscriber');
+
+      if (process.platform === 'win32') {
+        // Guard that the scenario is genuinely exercised here: the warmed
+        // payload really must carry a divergent fsPath, or this test would
+        // silently stop covering anything on its one meaningful platform.
+        const revealUri = revealPost.subscriber.location.uri;
+        assert.ok(typeof revealUri.fsPath === 'string' && revealUri.fsPath.length > 0,
+          'precondition (win32): the post-tree reveal payload must carry a serialized fsPath');
+        assert.notStrictEqual(revealUri.fsPath, revealUri.path,
+          'precondition (win32): the serialized fsPath must differ from uri.path');
+      }
+
+      const { subKey } = makeKeyFns();
+      assert.strictEqual(
+        subKey(revealPost.subscriber),
+        subKey(indexPost.subscribers[0]),
+        'the revealSubscriber payload must key to the same row as the index payload');
     } finally {
       store.dispose();
     }
