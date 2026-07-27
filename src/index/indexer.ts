@@ -373,13 +373,21 @@ export async function buildIndex(
       }
       if (r.appName !== undefined || r.appPublisher !== undefined) {
         // Preserve an existing `isWorkspaceApp: true` flag set earlier
-        // for the workspace project that owns this appId. The
-        // `excludeWorkspaceApps` short-circuit keeps a `.app` whose
-        // metadata read transiently failed, so a workspace twin can
-        // slip past exclusion; without this guard the Pass-2 merge
-        // would unconditionally overwrite the entry and strip the
-        // flag, dropping the workspace-first sort and `root-folder`
-        // icon downstream (see treeView.ts / subscriberTreeView.ts).
+        // for the workspace project that owns this appId (issue #105).
+        // Without this guard the Pass-2 merge would unconditionally
+        // overwrite the entry and strip the flag, dropping the
+        // workspace-first sort and `root-folder` icon downstream (see
+        // treeView.ts / subscriberTreeView.ts).
+        //
+        // Every route where the `.app`'s manifest is stable now excludes a
+        // workspace twin before it reaches here — `excludeWorkspaceApps` when
+        // the manifest was pre-read, the retry check above when it wasn't. The
+        // one live path left is a manifest that CHANGES between the two Pass-2
+        // reads: the package is rewritten in `.alpackages` (a build task, `AL:
+        // Download Symbols`) after the cheap `readAppMetadataMap` pre-read and
+        // before `readApp`, so exclusion judged the old appId while this merge
+        // keys on the new one. Covered by indexer.test.ts's
+        // "manifest changes mid-index (#105)".
         const prev = appMeta.get(r.appId);
         appMeta.set(r.appId, {
           appId: r.appId,

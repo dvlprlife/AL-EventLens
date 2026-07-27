@@ -17,33 +17,42 @@ const objectHeaderRe = new RegExp(
 const publisherAttrRe = /\[\s*(IntegrationEvent|BusinessEvent)\s*(?:\([^)]*\))?\s*\]/gi;
 
 // The tail after the event name — `, 'Element', false, false` and its
-// pre-BC22/BC22+ variants — is matched as `[^[]{0,512}?` rather than
-// `[\s\S]*?`, for two reasons:
+// pre-BC22/BC22+ variants — is matched as `(?:'[^']*'|[^[']){0,512}?` rather
+// than `[\s\S]*?`, for two reasons:
 //
-//  1. It may not cross a `[`. Every AL attribute opens with one, so an
-//     attribute left without its closing `)]` — an ordinary mid-edit /
-//     autosave state — can no longer run forward and consume the NEXT
-//     attribute's terminator. That used to yield one match spanning both
-//     attributes: capture groups came from the malformed attribute, the match
-//     END sat past the valid one, so the malformed target was bound to the
-//     valid attribute's procedure and the valid subscriber vanished from the
-//     index entirely (issue #184 D1).
+//  1. Outside a string literal it may not cross a `[`. Every AL attribute
+//     opens with one, so an attribute left without its closing `)]` — an
+//     ordinary mid-edit / autosave state — can no longer run forward and
+//     consume the NEXT attribute's terminator. That used to yield one match
+//     spanning both attributes: capture groups came from the malformed
+//     attribute, the match END sat past the valid one, so the malformed
+//     target was bound to the valid attribute's procedure and the valid
+//     subscriber vanished from the index entirely (issue #184 D1).
 //  2. The `{0,512}` cap bounds the per-match scan the way
 //     PROCEDURE_SEARCH_WINDOW bounds the procedure search: the real tail is a
 //     few dozen characters even heavily wrapped, so the cap stops a file full
 //     of unterminated attributes from re-scanning to EOF once per match.
 //
-// Accepted trade-off: a `[` inside the trailing element-name string literal
-// (`'Line[1]'`) no longer matches. Element names are field/control
-// identifiers, so that is not realistic AL, and the failure mode (subscriber
-// not detected) is strictly no worse than the pre-fix behavior for the
-// malformed case. Genuine multi-line attributes are unaffected — the class
-// excludes only `[`, not newlines.
+// The two alternatives are a whole single-quoted literal (`'[^']*'`) and any
+// other character that is not `[` (`[^[']`). A `[` inside the trailing
+// element-name literal therefore still matches — `'Line[1]'` is legal, since
+// a quoted AL identifier may contain brackets (`"Amount[LCY]"`) — while a
+// bare `[` in ordinary code, which is what opens the next attribute, still
+// stops the scan. The branches are disjoint at their first character, so the
+// alternation introduces no backtracking ambiguity, and neither excludes
+// newlines, so genuine multi-line attributes parse unchanged.
 //
-// `[^[]`, not `[^\[]`: `[` is not special inside a character class and the
+// Two consequences worth naming. The cap counts alternation steps, not
+// characters, so one quoted literal is a single step however long it is — the
+// bound is on match attempts, which is what keeps the scan linear. And the
+// only way past a `[` is a literal that spans it, which needs an odd number
+// of `'` in the intervening text; AL escapes an embedded quote by doubling it
+// (`'it''s'`), so that means source that no longer compiles.
+//
+// `[^[']`, not `[^\[']`: `[` is not special inside a character class and the
 // escaped form trips ESLint's `no-useless-escape`.
 const subscriberAttrRe =
-  /\[\s*EventSubscriber\s*\(\s*ObjectType::([A-Za-z]+)\s*,\s*[A-Za-z]+::(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))\s*,\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))[^[]{0,512}?\)\s*\]/gi;
+  /\[\s*EventSubscriber\s*\(\s*ObjectType::([A-Za-z]+)\s*,\s*[A-Za-z]+::(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))\s*,\s*(?:"([^"]+)"|'([^']+)'|([A-Za-z_][A-Za-z0-9_]*))(?:'[^']*'|[^[']){0,512}?\)\s*\]/gi;
 
 const procedureRe =
   /^[ \t]*(?:local|internal|protected)?[ \t]*procedure[ \t]+("([^"]+)"|[A-Za-z_][A-Za-z0-9_]*)/m;
