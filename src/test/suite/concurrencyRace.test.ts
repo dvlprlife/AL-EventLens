@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { Publisher, Subscriber } from '../../al/types';
 import type { EventIndex } from '../../index/indexer';
-import { runIndexAndCommit } from '../../index/reindex';
+import { runIndexAndCommit, runInitialIndex, runRefreshIndex } from '../../index/reindex';
 import { EventIndexStore } from '../../index/store';
 import { handleSave } from '../../index/watcher';
 import * as appJson from '../../index/appJson';
@@ -24,6 +24,11 @@ function deferred<T>(): Deferred<T> {
   let reject!: (e: unknown) => void;
   const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
   return { promise, resolve, reject };
+}
+
+/** Flush the microtask + setImmediate queue so detached promise chains run. */
+function flush(): Promise<void> {
+  return new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function makeIndex(label: string): EventIndex {
@@ -127,6 +132,33 @@ suite('index/reindex: runIndexAndCommit last-started-wins', () => {
       assert.strictEqual(store.get(), idx,
         'a non-racing run must commit normally — generation guard is for races only');
       assert.strictEqual(store.isInitialized, true);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('reissued defaults to false — on a committed run AND on one superseded by a newer full run', async () => {
+    // Pins the new `RunIndexResult.reissued` field's default: without the
+    // `reissueIfSuperseded` opt-in the primitive's contract is exactly what
+    // it was — last-started-wins, loser silently dropped, no replacement run.
+    const store = new EventIndexStore();
+    try {
+      const dA = deferred<EventIndex>();
+      const dB = deferred<EventIndex>();
+      const a = runIndexAndCommit(fakeContext(), store, () => dA.promise);
+      const b = runIndexAndCommit(fakeContext(), store, () => dB.promise);
+
+      dB.resolve(makeIndex('B'));
+      const resultB = await b.done;
+      assert.strictEqual(resultB.committed, true);
+      assert.strictEqual(resultB.reissued, false,
+        'a run that commits never re-issues');
+
+      dA.resolve(makeIndex('A'));
+      const resultA = await a.done;
+      assert.strictEqual(resultA.committed, false);
+      assert.strictEqual(resultA.reissued, false,
+        'without the opt-in flag a superseded run must NOT re-issue');
     } finally {
       store.dispose();
     }
@@ -620,6 +652,274 @@ suite('index/reindex: generation-guard regression fixes', () => {
       assert.ok(!finalEventNames.some((n) => n === 'OnAfterFoo'),
         `stale rebuild's OnAfterFoo must NOT have landed; got [${finalEventNames.join(', ')}]`);
     } finally {
+      store.dispose();
+    }
+  });
+});
+
+// ─── Tests: save-supersession re-issue on the activation and refresh
+// paths (issue #181) ────────────────────────────────────────────────────
+//
+// The activation pass and `alEventLens.refresh` both build the FULL index
+// and both were superseded — silently, with no recovery — by any `.al`
+// save that landed while they were in flight, leaving the store holding
+// nothing but that one file's records. These drive the real handler
+// bodies (`runInitialIndex` / `runRefreshIndex`, extracted into
+// `reindex.ts` precisely so they are reachable from the test host), not a
+// re-derived copy of them.
+
+/** A full-workspace snapshot: more than the single saved file's records. */
+function makeFullIndex(): EventIndex {
+  return {
+    publishers: [
+      { owner: { kind: 'codeunit', name: 'Cu A' }, eventName: 'OnEventA', kind: 'integration' },
+      { owner: { kind: 'codeunit', name: 'Cu B' }, eventName: 'OnEventB', kind: 'integration' }
+    ],
+    subscribers: [],
+    appMeta: new Map()
+  };
+}
+
+suite('index/reindex: save-supersession re-issue (issue #181)', () => {
+  teardown(() => { restoreConfig(); restoreDiscoverApps(); });
+
+  test('a save during the initial activation index re-issues a build that commits the full index', async () => {
+    patchConfig({});
+    patchDiscoverApps(async () => []);
+    const store = new EventIndexStore();
+    try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      let calls = 0;
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      const initial = runInitialIndex(fakeContext(), store, indexFn);
+      await flush();
+      assert.strictEqual(calls, 1, 'activation must start exactly one full index');
+
+      // A save lands mid-flight. `handleSave` commits its one-file delta
+      // and bumps the started-generation counter to protect it — which
+      // incidentally supersedes the in-flight full pass.
+      const uri = vscode.Uri.parse('file:///workspace/SavedDuringInitial.al');
+      await handleSave(fakeDoc(uri, AL_A), store);
+
+      // Resolve the initial pass: its commit is suppressed, so it must
+      // re-issue exactly one fresh full build.
+      deferreds[0].resolve(makeIndex('discarded-initial'));
+      await initial;
+      await flush();
+      assert.strictEqual(calls, 2,
+        'an initial index superseded by a save must re-issue exactly one fresh build');
+
+      // The re-issued build is newest, so it commits the whole workspace.
+      const fullIndex = makeFullIndex();
+      deferreds[1].resolve(fullIndex);
+      await flush();
+
+      assert.strictEqual(store.get(), fullIndex,
+        'the re-issued build must commit the full index');
+      const names = store.get().publishers.map((p) => p.eventName);
+      assert.ok(names.length > 1,
+        `the store must NOT be left holding only the saved file's records; got [${names.join(', ')}]`);
+      assert.ok(names.includes('OnEventB'),
+        `a publisher from outside the saved file must be present; got [${names.join(', ')}]`);
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a save during alEventLens.refresh re-issues a build that commits the full index', async () => {
+    // Refresh is the user's obvious recovery from a bad index, and it had
+    // the identical hole — so a steady autosave cadence could defeat
+    // repeated manual attempts.
+    patchConfig({});
+    patchDiscoverApps(async () => []);
+    const store = new EventIndexStore();
+    try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      let calls = 0;
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      const refresh = runRefreshIndex(fakeContext(), store, indexFn);
+      await flush();
+      assert.strictEqual(calls, 1, 'refresh must start exactly one full index');
+
+      const uri = vscode.Uri.parse('file:///workspace/SavedDuringRefresh.al');
+      await handleSave(fakeDoc(uri, AL_A), store);
+
+      deferreds[0].resolve(makeIndex('discarded-refresh'));
+      await refresh;
+      await flush();
+      assert.strictEqual(calls, 2,
+        'a refresh superseded by a save must re-issue exactly one fresh build');
+
+      const fullIndex = makeFullIndex();
+      deferreds[1].resolve(fullIndex);
+      await flush();
+
+      assert.strictEqual(store.get(), fullIndex,
+        'the re-issued refresh must commit the full index');
+      assert.ok(store.get().publishers.length > 1,
+        'the store must NOT be left holding only the saved file\'s records');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a genuinely newer full run supersedes the initial pass WITHOUT re-issuing', async () => {
+    // The discriminator: `bumpStartedGeneration` (a save) does not bump
+    // `latestRunSeq`, but a second full run does. A superseded run that
+    // sees a newer full run stands down — re-issuing here would be the
+    // #113 / #119 last-started-wins bug class all over again.
+    const store = new EventIndexStore();
+    try {
+      let calls = 0;
+      const dInitial = deferred<EventIndex>();
+      const dRefresh = deferred<EventIndex>();
+
+      const initial = runInitialIndex(fakeContext(), store, () => {
+        calls++;
+        return dInitial.promise;
+      });
+      const refresh = runRefreshIndex(fakeContext(), store, () => {
+        calls++;
+        return dRefresh.promise;
+      });
+      await flush();
+      assert.strictEqual(calls, 2, 'two callers start two runs');
+
+      // The refresh owns the newest generation, so it commits.
+      const refreshIndex = makeIndex('refresh');
+      dRefresh.resolve(refreshIndex);
+      await refresh;
+      assert.strictEqual(store.get(), refreshIndex, 'the newer full run commits');
+
+      // The initial pass now resolves superseded — but by a full run, not
+      // a save, so it must NOT re-issue.
+      dInitial.resolve(makeIndex('initial'));
+      await initial;
+      await flush();
+
+      assert.strictEqual(calls, 2,
+        'a run superseded by a NEWER FULL RUN must NOT re-issue (that run already commits)');
+      assert.strictEqual(store.get(), refreshIndex,
+        'the store still reflects the newer run');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('at most one re-issue: a save during the re-issued build does not arm a third', async () => {
+    // The re-issued run is started with the flag OFF, so a save storm
+    // degrades to "the index catches up on the next save or Refresh" —
+    // never an unbounded rebuild loop.
+    patchConfig({});
+    patchDiscoverApps(async () => []);
+    const store = new EventIndexStore();
+    try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      let calls = 0;
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      const initial = runInitialIndex(fakeContext(), store, indexFn);
+      await flush();
+
+      // Save #1 supersedes build #1 → one re-issue.
+      await handleSave(fakeDoc(vscode.Uri.parse('file:///workspace/Loop1.al'), AL_A), store);
+      deferreds[0].resolve(makeIndex('discarded-1'));
+      await initial;
+      await flush();
+      assert.strictEqual(calls, 2, 'the first supersession re-issues once');
+
+      // Save #2 supersedes the RE-ISSUED build #2 → no further re-issue.
+      await handleSave(fakeDoc(vscode.Uri.parse('file:///workspace/Loop2.al'), AL_B), store);
+      deferreds[1].resolve(makeIndex('discarded-2'));
+      await flush();
+      await flush();
+
+      assert.strictEqual(calls, 2,
+        'the re-issued build must NOT arm a further re-issue — no rebuild loop');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('the superseded log names its cause: a file save (re-indexing) vs a newer run (discarding)', async () => {
+    // Issue #181's second half: the old line read "initial build
+    // superseded - using newer index" in BOTH cases, which was actively
+    // misleading — on the save path no newer index existed at all.
+    patchConfig({});
+    patchDiscoverApps(async () => []);
+    const originalConsoleLog = console.log;
+    const logs: string[] = [];
+    Object.defineProperty(console, 'log', {
+      configurable: true,
+      writable: true,
+      value: (...args: unknown[]): void => { logs.push(args.map((a) => String(a)).join(' ')); }
+    });
+    const store = new EventIndexStore();
+    try {
+      // (a) superseded by a SAVE.
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      const indexFn = (): Promise<EventIndex> => {
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+      const initial = runInitialIndex(fakeContext(), store, indexFn);
+      await flush();
+      await handleSave(fakeDoc(vscode.Uri.parse('file:///workspace/LogA.al'), AL_A), store);
+      deferreds[0].resolve(makeIndex('discarded'));
+      await initial;
+      await flush();
+
+      assert.ok(logs.some((l) => l.includes('re-indexing')),
+        `save-supersession must log that it is re-indexing; got ${JSON.stringify(logs)}`);
+      assert.ok(!logs.some((l) => l.includes('using newer index')),
+        `the misleading "using newer index" wording must be gone; got ${JSON.stringify(logs)}`);
+
+      // Settle the re-issued build so it does not bleed into part (b).
+      deferreds[1].resolve(makeIndex('reissued'));
+      await flush();
+
+      // (b) superseded by a NEWER FULL RUN.
+      logs.length = 0;
+      const dInitial = deferred<EventIndex>();
+      const dRefresh = deferred<EventIndex>();
+      const initial2 = runInitialIndex(fakeContext(), store, () => dInitial.promise);
+      const refresh2 = runRefreshIndex(fakeContext(), store, () => dRefresh.promise);
+      dRefresh.resolve(makeIndex('newer'));
+      await refresh2;
+      dInitial.resolve(makeIndex('older'));
+      await initial2;
+      await flush();
+
+      assert.ok(logs.some((l) => l.includes('discarding')),
+        `newer-run supersession must log that the result is discarded; got ${JSON.stringify(logs)}`);
+      assert.ok(!logs.some((l) => l.includes('re-indexing')),
+        `newer-run supersession must NOT claim a re-index; got ${JSON.stringify(logs)}`);
+      assert.ok(!logs.some((l) => l.includes('using newer index')),
+        `the misleading "using newer index" wording must be gone; got ${JSON.stringify(logs)}`);
+    } finally {
+      Object.defineProperty(console, 'log', {
+        configurable: true,
+        writable: true,
+        value: originalConsoleLog
+      });
       store.dispose();
     }
   });

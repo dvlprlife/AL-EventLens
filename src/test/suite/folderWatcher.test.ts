@@ -2,7 +2,7 @@ import * as assert from 'assert';
 import * as vscode from 'vscode';
 import type { EventIndex } from '../../index/indexer';
 import { registerWorkspaceFolderReindex } from '../../index/folderWatcher';
-import { bumpStartedGeneration } from '../../index/reindex';
+import { bumpStartedGeneration, runIndexAndCommit } from '../../index/reindex';
 import { EventIndexStore } from '../../index/store';
 
 // ─── Deferred promise helper ───────────────────────────────────────────
@@ -334,6 +334,59 @@ suite('index/folderWatcher: registerWorkspaceFolderReindex', () => {
         'a stale rebuild superseded by a NEWER folder change must NOT re-issue (no ping-pong)');
       assert.strictEqual(store.get(), secondIndex,
         'the store still reflects the committed second rebuild');
+    } finally {
+      store.dispose();
+    }
+  });
+
+  test('a folder rebuild superseded by a newer full index run does not re-issue', async () => {
+    // Pins the one intentional behaviour delta from migrating this path
+    // onto the shared `reissueIfSuperseded` policy (issue #181). The old
+    // per-registration counter was bumped only by folder changes, so a
+    // rebuild superseded by a *Refresh* still re-issued — a redundant
+    // duplicate full scan whose result the Refresh immediately overwrote.
+    // The shared `latestRunSeq` sees the Refresh as a newer full run, so
+    // the rebuild stands down. The committed end state is identical (the
+    // superseding run reads `workspaceFolders` at call time, so it
+    // includes the new folder); only the wasted scan is gone.
+    patchOnDidChange();
+    const store = new EventIndexStore();
+    try {
+      const deferreds: Array<Deferred<EventIndex>> = [];
+      let calls = 0;
+      const indexFn = (): Promise<EventIndex> => {
+        calls++;
+        const d = deferred<EventIndex>();
+        deferreds.push(d);
+        return d.promise;
+      };
+
+      registerWorkspaceFolderReindex(fakeContext(), store, indexFn);
+
+      // Folder change → rebuild starts, suspended.
+      captured!(fakeEvent());
+      await flush();
+      assert.strictEqual(calls, 1, 'folder change starts exactly one rebuild');
+
+      // A separate full run — a manual Refresh — starts and commits.
+      const refreshIndex: EventIndex = {
+        publishers: [{ owner: { kind: 'codeunit', name: 'RefreshCu' }, eventName: 'OnRefresh', kind: 'integration' }],
+        subscribers: [],
+        appMeta: new Map()
+      };
+      const refresh = runIndexAndCommit(fakeContext(), store, async () => refreshIndex);
+      const refreshResult = await refresh.done;
+      assert.strictEqual(refreshResult.committed, true, 'the newer full run commits');
+
+      // The folder rebuild now resolves superseded — by a full run, not a
+      // save — so it must NOT re-issue.
+      deferreds[0].resolve(emptyIndex);
+      await flush();
+
+      assert.strictEqual(calls, 1,
+        'a folder rebuild superseded by a newer FULL RUN must not fire a redundant duplicate scan');
+      assert.strictEqual(store.get(), refreshIndex,
+        'the store reflects the committed newer run');
     } finally {
       store.dispose();
     }

@@ -6,7 +6,7 @@ import { registerCodeLens } from './ui/codelens';
 import { runExportMermaid } from './commands/exportMermaid';
 import { registerSaveWatcher, resetWatcherStateForReload } from './index/watcher';
 import { registerWorkspaceFolderReindex } from './index/folderWatcher';
-import { resetExtensionStateForReload, runIndexAndCommit } from './index/reindex';
+import { resetExtensionStateForReload, runInitialIndex, runRefreshIndex } from './index/reindex';
 import { EventIndexStore } from './index/store';
 import type { ObjectRef, Publisher, Subscriber } from './al/types';
 import { reviveRange } from './util/reviveLocation';
@@ -20,15 +20,9 @@ export function activate(context: vscode.ExtensionContext): void {
   };
 
   register('alEventLens.openPanel',       () => openPanel(context, store));
-  register('alEventLens.refresh',         () => {
-    // `runIndexAndCommit` wraps `runIndexWithProgress` with a monotonic
-    // generation guard so an in-flight initial pass cannot overwrite the
-    // store with an older snapshot after a faster Refresh completes — and
-    // vice versa. The last STARTED build wins regardless of resolution
-    // order; we still surface errors via the existing log.
-    runIndexAndCommit(context, store).done
-      .catch((err) => console.error('AL EventLens: refresh failed', err));
-  });
+  // Body lives in `reindex.ts` (last-started-wins ordering + the
+  // save-supersession re-issue) so tests drive the real handler.
+  register('alEventLens.refresh',         () => { void runRefreshIndex(context, store); });
   register('alEventLens.revealPublisher', (...args) => {
     if (!args[0]) { return; }
     const publisher = args[0] as Publisher;
@@ -104,41 +98,11 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(registerWorkspaceFolderReindex(context, store));
 
   // Fire-and-forget initial index. The result populates the store so the
-  // panel, tree, and CodeLens surfaces can render once it completes.
-  // On failure, still mark the store initialized (with an empty index) so
-  // the tree's `indexing…` placeholder progresses to the real empty-state
-  // message rather than spinning forever — but ONLY if NO commit has
-  // landed yet. The `store.isInitialized` gate covers BOTH commit paths:
-  // a successful `runIndexAndCommit.set` (full pass) AND a successful
-  // `handleSave.updateFile` (save during a slow failing initial). If
-  // either has fired, the store already holds real data and the empty
-  // fallback would clobber it. If BOTH this initial pass AND a refresh
-  // fail with no save in between, `store.isInitialized` stays false and
-  // the fallback still fires so the spinner clears.
-  const initial = runIndexAndCommit(context, store);
-  initial.done
-    .then(({ index, committed }) => {
-      if (committed) {
-        console.log(`AL EventLens: indexed ${index.publishers.length} publishers, ${index.subscribers.length} subscribers`);
-      } else {
-        console.log('AL EventLens: initial build superseded - using newer index');
-      }
-    })
-    .catch((err) => {
-      console.error('AL EventLens: indexing failed', err);
-      // Parser-bug errors carry a recognizable marker prefix (see
-      // `indexer.ts`); surface them via a toast so the user actually
-      // notices and can file an issue. Transient I/O errors stay
-      // console-only — they're noisy and usually self-heal.
-      if (err instanceof Error && err.message.startsWith('[AL EventLens parser bug]')) {
-        void vscode.window.showErrorMessage(
-          `AL EventLens: parser bug — please file an issue. ${err.message}`
-        );
-      }
-      if (!store.isInitialized) {
-        store.set({ publishers: [], subscribers: [], appMeta: new Map() });
-      }
-    });
+  // panel, tree, and CodeLens surfaces can render once it completes. Body
+  // lives in `reindex.ts` — including the empty-index failure fallback and
+  // why it is gated on `!store.isInitialized` — so the same tests that
+  // drive the commit policy drive the real activation call site.
+  void runInitialIndex(context, store);
 }
 
 export function deactivate(): void {
