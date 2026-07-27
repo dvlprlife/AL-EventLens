@@ -218,6 +218,60 @@ suite('al/parser: publisher parameters', () => {
       { name: 'Quoted (Param)', typeText: 'Integer', isVar: false }
     ]);
   });
+
+  test('quoted parameter name containing a colon is not split (#184 D2)', () => {
+    // #133 made the paren-matching and semicolon-splitting scanners skip
+    // `"…"` spans but left the `Name : Type` split quote-blind, so this
+    // parsed as name `"My`, type `Param": Integer`.
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnEvt("My:Param": Integer; Flag: Boolean)',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'My:Param', typeText: 'Integer', isVar: false },
+      { name: 'Flag', typeText: 'Boolean', isVar: false }
+    ]);
+  });
+
+  test('var + a quoted colon-bearing parameter name (#184 D2)', () => {
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnEvt(var "A:B": Record "Sales Header")',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'A:B', typeText: 'Record "Sales Header"', isVar: true }
+    ]);
+  });
+
+  test('a colon inside a quoted subtype does not move the separator', () => {
+    // Passes today; pins that the FIRST UNQUOTED colon is still the
+    // `Name : Type` separator after the #184 D2 change.
+    const src = [
+      'codeunit 50100 "C"',
+      '{',
+      '    [IntegrationEvent(false, false)]',
+      '    procedure OnEvt(Rec: Record "Ns::Weird")',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { publishers } = parseAl(uri, src);
+    assert.deepStrictEqual(publishers[0].parameters, [
+      { name: 'Rec', typeText: 'Record "Ns::Weird"', isVar: false }
+    ]);
+  });
 });
 
 suite('al/parser: subscribers', () => {
@@ -1118,5 +1172,159 @@ suite('al/parser: attribute inside a string literal (#179)', () => {
     const { publishers } = parseAl(uri, src);
     assert.strictEqual(publishers.length, 0,
       'directive text is free text, not a decorator');
+  });
+});
+
+suite('al/parser: malformed subscriber attribute (#184 D1)', () => {
+  // `subscriberAttrRe`'s trailing-arguments span used to be `[\s\S]*?`, which
+  // ran forward past an attribute missing its `)]` and consumed the NEXT
+  // attribute's terminator. The capture groups came from the malformed
+  // attribute while the match ENDED past the valid one, so the malformed
+  // target was bound to the valid attribute's procedure and the valid
+  // subscriber disappeared. The span now excludes `[` outside a string
+  // literal, which is what every AL attribute opens with.
+
+  test('a malformed [EventSubscriber( does not swallow the next valid subscriber', () => {
+    // Both procedures live in ONE object on purpose: split across two objects,
+    // #159's owner-boundary guard would drop the bad match for an unrelated
+    // reason and this would prove nothing. Pre-fix: one subscriber, Customer /
+    // OnAfterInsertEvent, bound to procedure B — and no Vendor at all.
+    const src = [
+      'codeunit 50100 "Sub Cu"',
+      '{',
+      '    [EventSubscriber(ObjectType::Table, Database::"Customer", OnAfterInsertEvent, \'\', false, false',
+      '    procedure A()',
+      '    begin',
+      '    end;',
+      '',
+      '    [EventSubscriber(ObjectType::Table, Database::"Vendor", OnAfterModifyEvent, \'\', false, false)]',
+      '    procedure B()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 1,
+      'the valid second subscriber must survive the malformed first attribute');
+    assert.strictEqual(subscribers[0].target.name, 'Vendor');
+    assert.strictEqual(subscribers[0].targetEvent, 'OnAfterModifyEvent');
+    assert.ok(!subscribers.some((s) => s.target.name === 'Customer'),
+      'the malformed attribute must not be cross-bound to the next procedure');
+  });
+
+  test('a malformed attribute with nothing after it yields no subscriber', () => {
+    const src = [
+      'codeunit 50100 "Sub Cu"',
+      '{',
+      '    [EventSubscriber(ObjectType::Table, Database::"Customer", OnAfterInsertEvent, \'\', false, false',
+      '    procedure A()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 0,
+      'an attribute that never closes is not a subscriber declaration');
+  });
+
+  test('an intervening non-attribute [ does not restart the swallow', () => {
+    // The tail's non-literal branch excludes `[` whatever it opens — an
+    // `array[10]` declaration between the two attributes stops the malformed
+    // match just as the next attribute's `[` would, so the valid subscriber
+    // is still the only one found.
+    const src = [
+      'codeunit 50100 "Sub Cu"',
+      '{',
+      '    [EventSubscriber(ObjectType::Table, Database::"Customer", OnAfterInsertEvent, \'\', false, false',
+      '    procedure A()',
+      '    var',
+      '        Buf: array[10] of Integer;',
+      '    begin',
+      '    end;',
+      '',
+      '    [EventSubscriber(ObjectType::Table, Database::"Vendor", OnAfterModifyEvent, \'\', false, false)]',
+      '    procedure B()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 1);
+    assert.strictEqual(subscribers[0].target.name, 'Vendor');
+    assert.strictEqual(subscribers[0].targetEvent, 'OnAfterModifyEvent');
+  });
+
+  test('a genuine multi-line attribute still parses', () => {
+    // Neither tail branch excludes newlines, so a wrapped attribute — here
+    // split across three lines — is unaffected.
+    const src = [
+      'codeunit 50203 "Multi Line Sub"',
+      '{',
+      '    [EventSubscriber(',
+      '        ObjectType::Codeunit, Codeunit::\'Sales Post\',',
+      '        \'OnAfterPostSalesDoc\', \'\', false, false)]',
+      '    local procedure HandleIt()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 1);
+    assert.strictEqual(subscribers[0].target.name, 'Sales Post');
+    assert.strictEqual(subscribers[0].targetEvent, 'OnAfterPostSalesDoc');
+  });
+
+  test('an ordinary element-name argument still parses', () => {
+    // Guards the new tail class against the common 4th argument.
+    const src = [
+      'codeunit 50100 "Sub Cu"',
+      '{',
+      '    [EventSubscriber(ObjectType::Table, Database::"Customer", OnAfterInsertEvent, \'No.\', false, false)]',
+      '    local procedure HandleIt()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 1);
+    assert.strictEqual(subscribers[0].target.name, 'Customer');
+    assert.strictEqual(subscribers[0].targetEvent, 'OnAfterInsertEvent');
+  });
+
+  test('an element name containing [ still parses (BC22+ syntax)', () => {
+    // A quoted AL identifier may legally contain brackets — `"Amount[LCY]"` is
+    // an ordinary field name — so the element-name argument must be allowed to
+    // carry one. The tail matches a whole `'…'` literal as a single step, so
+    // the `[` inside it is not the bare `[` that stops the scan.
+    const src = [
+      'codeunit 50100 "Sub Cu"',
+      '{',
+      '    [EventSubscriber(ObjectType::Table, Database::"Sales Line", OnAfterInsertEvent, \'Line[1]\', false, false)]',
+      '    local procedure HandleIt()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 1,
+      'a bracketed element name must not drop the subscriber');
+    assert.strictEqual(subscribers[0].target.name, 'Sales Line');
+    assert.strictEqual(subscribers[0].targetEvent, 'OnAfterInsertEvent');
+  });
+
+  test('an element name containing [ still parses (pre-BC22 syntax)', () => {
+    const src = [
+      'codeunit 50101 "Sub Cu"',
+      '{',
+      '    [EventSubscriber(ObjectType::Codeunit, Codeunit::\'Sales Post\', \'OnAfterPostSalesDoc\', \'Line[1]\', false, false)]',
+      '    local procedure HandleIt()',
+      '    begin',
+      '    end;',
+      '}'
+    ].join('\n');
+    const { subscribers } = parseAl(uri, src);
+    assert.strictEqual(subscribers.length, 1);
+    assert.strictEqual(subscribers[0].target.name, 'Sales Post');
+    assert.strictEqual(subscribers[0].targetEvent, 'OnAfterPostSalesDoc');
   });
 });

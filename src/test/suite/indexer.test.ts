@@ -1631,15 +1631,16 @@ suite('index/indexer: buildIndex', () => {
     assert.strictEqual(APP_ID, APP_ID); // anchor — value used implicitly above
   });
 
-  test('Pass-2 merge preserves isWorkspaceApp when a workspace .app leaks past exclusion', async () => {
+  test('a workspace .app whose metadata pre-read fails is dropped at version selection (default path)', async () => {
     // Set up a workspace project whose app.json id matches a `.app` in
     // .alpackages, AND make the metadata pre-read fail for that .app so
-    // it leaks past `excludeWorkspaceApps` (which keeps a URI absent
-    // from `metaByUri` to surface the error in Pass-2). Pre-fix, the
-    // Pass-2 merge would set the entry with no `isWorkspaceApp` flag,
-    // stripping the workspace marker the workspace-app registration
-    // had stamped at the top of buildIndex. Post-fix, the merge keeps
-    // any existing `isWorkspaceApp: true` on the prior entry.
+    // it survives `excludeWorkspaceApps` (which keeps a URI absent from
+    // `metaByUri` to surface the error in Pass 2). On the DEFAULT
+    // `includeAllAppVersions: false` path that is as far as it gets:
+    // `selectHighestVersionPerAppId` drops a no-metadata URI, so the twin is
+    // never read again and contributes nothing to the index. Named after the
+    // #105 `isWorkspaceApp` guard originally, this test never reached the
+    // Pass-2 merge — the assertions below pin what it actually establishes.
     const APP_ID = '11111111-1111-1111-1111-111111111111';
     const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
     const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
@@ -1681,15 +1682,202 @@ suite('index/indexer: buildIndex', () => {
 
     const idx = await buildIndex(fakeContext());
 
-    // The .app leaked past exclusion (its metadata read failed) and
-    // Pass 2 succeeded in reading it. The merged appMeta entry for
-    // this appId must STILL carry isWorkspaceApp: true so the tree
-    // continues to sort and icon it as a workspace project.
+    // The .app survived exclusion (its metadata read failed, so there was no
+    // appId to judge it on) but was then dropped at version selection, so the
+    // Pass-2 retry is never reached on this path and the twin contributes
+    // nothing. The `includeAllAppVersions: true` test below exercises the
+    // retry itself (#184 D3); this one pins the default path.
+    assert.strictEqual(appReadCalls, 1,
+      'the twin must be read exactly once — the failing metaByUri pre-read — ' +
+      'and never re-read after version selection drops it');
+    assert.ok(!idx.publishers.some((p) => p.eventName === 'OnAppEvent'),
+      'the excluded twin must contribute no SymbolReference publishers');
+    assert.strictEqual(idx.publishers.length, 1,
+      'only the workspace-source publisher may appear');
+    assert.strictEqual(idx.publishers[0].eventName, 'OnAfterFoo');
+    // Nothing overwrote the workspace-app registration, so its `isWorkspaceApp`
+    // marker (which drives the tree's workspace-first sort and root-folder
+    // icon) is still there.
     const entry = idx.appMeta.get(APP_ID);
     assert.ok(entry, 'appMeta must have an entry for the workspace app id');
     assert.strictEqual(entry!.isWorkspaceApp, true,
-      'isWorkspaceApp: true must be preserved on the merged entry — ' +
+      'the workspace registration must survive a Pass 2 that read nothing');
+  });
+
+  test('Pass-2 merge preserves isWorkspaceApp when a .app manifest changes mid-index (#105)', async () => {
+    // The live path to the `prev?.isWorkspaceApp` merge guard. Every route
+    // where the manifest is stable is now closed — `excludeWorkspaceApps`
+    // drops a twin whose metadata was pre-read, and the #184 D3 retry check
+    // drops one whose pre-read failed — so the guard only fires when the two
+    // Pass-2 reads of the same `.app` see DIFFERENT manifests: the package is
+    // rewritten on disk between the cheap `readAppMetadataMap` pre-read and
+    // the full `readApp` (an `AL: Download Symbols` or a build task landing in
+    // `.alpackages` mid-index). Exclusion and version selection judge the old
+    // manifest's appId — not a workspace app — while the merge keys on the new
+    // one, which IS the open project's. Without the guard the merge overwrites
+    // the workspace registration and strips `isWorkspaceApp`, dropping the
+    // tree's workspace-first sort and root-folder icon.
+    const APP_ID = '11111111-1111-1111-1111-111111111111';
+    const OTHER_APP_ID = '99999999-9999-9999-9999-999999999999';
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    // `name` differs between the two so the assertions can tell whether the
+    // Pass-2 merge actually ran (it must) from whether it kept the flag.
+    const workspaceAppJson = JSON.stringify({
+      id: APP_ID,
+      name: 'Workspace Sample',
+      publisher: 'Test'
+    });
+    // Read 1 (metaByUri pre-read): a package for some OTHER app — kept by
+    // `excludeWorkspaceApps` and by `selectHighestVersionPerAppId`.
+    const staleBytes = await buildAppBytes({
+      manifestXml: `<?xml version="1.0" encoding="utf-8"?>
+<Package>
+  <App Id="${OTHER_APP_ID}" Name="Other Dependency" Publisher="Test" Version="1.0.0.0" />
+</Package>`,
+      symbolReferenceJson: JSON.stringify({ AppId: OTHER_APP_ID, Codeunits: [] })
+    });
+    // Read 2+ (`readApp` on cache miss): the file has been replaced by the
+    // compiled twin of the open workspace project.
+    const freshBytes = await buildAppBytes({
+      manifestXml: `<?xml version="1.0" encoding="utf-8"?>
+<Package>
+  <App Id="${APP_ID}" Name="Compiled Sample" Publisher="Test" Version="1.0.0.0" />
+</Package>`,
+      symbolReferenceJson: JSON.stringify({ AppId: APP_ID, Codeunits: [] })
+    });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(workspaceAppJson)],
+        [appUri.toString(), staleBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      appJsonFiles: [appJsonUri],
+      fs,
+      includeTriggerEvents: false
+    });
+    const previousFs = vscode.workspace.fs;
+    let appReadCalls = 0;
+    const wrappedFs = {
+      ...previousFs,
+      readFile: async (uri: vscode.Uri): Promise<Uint8Array> => {
+        if (uri.toString() === appUri.toString()) {
+          appReadCalls++;
+          if (appReadCalls > 1) {
+            return freshBytes;
+          }
+        }
+        return previousFs.readFile(uri);
+      }
+    } as typeof vscode.workspace.fs;
+    Object.defineProperty(vscode.workspace, 'fs', { configurable: true, value: wrappedFs });
+
+    const idx = await buildIndex(fakeContext());
+
+    assert.ok(appReadCalls >= 2,
+      'the package must be read twice (manifest pre-read, then full readApp)');
+    const entry = idx.appMeta.get(APP_ID);
+    assert.ok(entry, 'appMeta must have an entry for the workspace app id');
+    // Proves the Pass-2 merge branch ran on this appId rather than the
+    // workspace registration simply being left alone.
+    assert.strictEqual(entry!.name, 'Compiled Sample',
+      'the Pass-2 merge must have overwritten the workspace registration');
+    assert.strictEqual(entry!.isWorkspaceApp, true,
+      'isWorkspaceApp: true must be preserved across the merge — ' +
       'otherwise the tree drops the workspace-first sort and root-folder icon');
+  });
+
+  test('a workspace-twin .app whose metadata pre-read fails is not indexed twice (#184 D3)', async () => {
+    // `excludeWorkspaceApps` keeps a URI whose manifest pre-read failed (it has
+    // no appId to judge on) and the Pass-2 worker retries the read. Under
+    // `includeAllAppVersions: true` — the only path where a no-metadata URI
+    // survives version selection — the retry succeeds, the compiled twin is
+    // read in full, and its SymbolReference publishers used to merge alongside
+    // the authoritative workspace-source ones, listing every event twice.
+    //
+    // The two GUIDs differ in case on purpose — an `app.json` `id` and a
+    // `NavxManifest.xml` `Id` for the same app routinely do (issues #130 /
+    // #158) — so the `.toLowerCase()` in the retry-time check is load-bearing
+    // here: drop it and the twin is no longer recognized and OnAfterFoo comes
+    // back doubled.
+    const APP_ID = 'aabbccdd-1111-2222-3333-444455556666';
+    const MANIFEST_APP_ID = 'AABBCCDD-1111-2222-3333-444455556666';
+    const cuUri = vscode.Uri.parse('file:///workspace/MyCodeunit.al');
+    const appJsonUri = vscode.Uri.parse('file:///workspace/app.json');
+    const appUri = vscode.Uri.parse('file:///workspace/.alpackages/Sample.app');
+    const appJson = JSON.stringify({ id: APP_ID, name: 'Sample', publisher: 'Test' });
+    // SymbolReference mirrors the workspace source, so a leak is a literal
+    // duplicate of OnAfterFoo rather than an extra unrelated event.
+    const appBytes = await buildAppBytes({
+      manifestXml: `<?xml version="1.0" encoding="utf-8"?>
+<Package>
+  <App Id="${MANIFEST_APP_ID}" Name="Sample" Publisher="Test" Version="1.0.0.0" />
+</Package>`,
+      symbolReferenceJson: JSON.stringify({
+        AppId: MANIFEST_APP_ID,
+        Codeunits: [
+          {
+            Name: 'My Codeunit',
+            Methods: [{ Name: 'OnAfterFoo', Attributes: [{ Name: 'IntegrationEvent' }] }]
+          }
+        ]
+      })
+    });
+    const fs: FakeFs = {
+      bytes: new Map([
+        [cuUri.toString(), encode(SAMPLE_CODEUNIT_AL)],
+        [appJsonUri.toString(), encode(appJson)],
+        [appUri.toString(), appBytes]
+      ])
+    };
+    applyPatches({
+      alFiles: [cuUri],
+      appFiles: [appUri],
+      appJsonFiles: [appJsonUri],
+      fs,
+      includeAllAppVersions: true,
+      includeTriggerEvents: false
+    });
+    // FIRST read of `appUri` (the metaByUri pre-read) throws, leaving the URI
+    // absent from metaByUri; later reads succeed, so the Pass-2 retry works.
+    const previousFs = vscode.workspace.fs;
+    let appReadCalls = 0;
+    const wrappedFs = {
+      ...previousFs,
+      readFile: async (uri: vscode.Uri): Promise<Uint8Array> => {
+        if (uri.toString() === appUri.toString()) {
+          appReadCalls++;
+          if (appReadCalls === 1) {
+            throw new Error('synthetic: metaByUri pre-read failed');
+          }
+        }
+        return previousFs.readFile(uri);
+      }
+    } as typeof vscode.workspace.fs;
+    Object.defineProperty(vscode.workspace, 'fs', { configurable: true, value: wrappedFs });
+
+    const idx = await buildIndex(fakeContext());
+
+    const foo = idx.publishers.filter((p) => p.eventName === 'OnAfterFoo');
+    assert.strictEqual(foo.length, 1,
+      `the compiled twin must not duplicate the workspace publisher (got ${foo.length})`);
+    // `parseSymbolReference` emits `location: undefined`; workspace-source
+    // publishers carry a real `vscode.Location`. The survivor must be the
+    // workspace one — the authoritative source per CLAUDE.md.
+    assert.ok(foo[0].location !== undefined,
+      'the surviving publisher must be the workspace-source one, not the .app copy');
+    // The retry-time check returns before the Pass-2 merge, so the workspace
+    // registration is left exactly as Pass 1 stamped it. This is not the #105
+    // merge guard — that path is exercised by the mid-index manifest-change
+    // test above — only that the early return contributes no appMeta entry.
+    assert.strictEqual(idx.appMeta.get(APP_ID)?.isWorkspaceApp, true,
+      'the workspace registration must be untouched by the skipped twin');
+    assert.ok(appReadCalls >= 2, 'the Pass-2 metadata retry must actually run');
   });
 
   // ─── #115: Pass-1 error handling — read vs parse split ─────────────────

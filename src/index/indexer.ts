@@ -288,9 +288,29 @@ export async function buildIndex(
         // a cold start over many packages reusing the map halves the
         // per-package work on a cache hit. The map is now always built, so
         // the fall-through only covers a single URI whose manifest read
-        // failed during the map pass (such a URI is kept by the selection
-        // helpers so this loop's try/catch can surface the failure).
-        const meta = metaByUri.get(uri.toString()) ?? await readAppMetadata(uri);
+        // failed during the map pass. Reachable only on the
+        // `includeAllAppVersions: true` path: `dedupByAppIdVersion` keeps a
+        // no-metadata URI so this loop's try/catch can surface the failure,
+        // while `selectHighestVersionPerAppId` (the default path) drops it.
+        let meta = metaByUri.get(uri.toString());
+        if (!meta) {
+          // The manifest pre-read failed for this URI, so `excludeWorkspaceApps`
+          // kept it — it had no appId to judge on. Retry here, since a transient
+          // failure (AV lock, brief I/O error) must not drop a real dependency
+          // package, but re-apply the workspace-twin check now that `appId` is
+          // finally known. Without it a twin whose pre-read blipped is read in
+          // full and its SymbolReference publishers merge alongside the
+          // authoritative workspace-source ones, listing every event of that app
+          // twice until the next clean rebuild (issue #184 D3).
+          meta = await readAppMetadata(uri);
+          if (workspaceAppIds.has(meta.appId.toLowerCase())) {
+            console.warn(
+              `AL EventLens: skipping ${uri.fsPath} — compiled twin of workspace app ` +
+              `${meta.appId} (manifest pre-read failed; exclusion re-checked after retry)`
+            );
+            return undefined;
+          }
+        }
         const key: CacheKey = { appId: meta.appId, version: meta.version, mtime: stat.mtime };
         const cached = await loadCachedSymbols(context, key);
         if (cached) {
@@ -353,13 +373,21 @@ export async function buildIndex(
       }
       if (r.appName !== undefined || r.appPublisher !== undefined) {
         // Preserve an existing `isWorkspaceApp: true` flag set earlier
-        // for the workspace project that owns this appId. The
-        // `excludeWorkspaceApps` short-circuit keeps a `.app` whose
-        // metadata read transiently failed, so a workspace twin can
-        // slip past exclusion; without this guard the Pass-2 merge
-        // would unconditionally overwrite the entry and strip the
-        // flag, dropping the workspace-first sort and `root-folder`
-        // icon downstream (see treeView.ts / subscriberTreeView.ts).
+        // for the workspace project that owns this appId (issue #105).
+        // Without this guard the Pass-2 merge would unconditionally
+        // overwrite the entry and strip the flag, dropping the
+        // workspace-first sort and `root-folder` icon downstream (see
+        // treeView.ts / subscriberTreeView.ts).
+        //
+        // Every route where the `.app`'s manifest is stable now excludes a
+        // workspace twin before it reaches here — `excludeWorkspaceApps` when
+        // the manifest was pre-read, the retry check above when it wasn't. The
+        // one live path left is a manifest that CHANGES between the two Pass-2
+        // reads: the package is rewritten in `.alpackages` (a build task, `AL:
+        // Download Symbols`) after the cheap `readAppMetadataMap` pre-read and
+        // before `readApp`, so exclusion judged the old appId while this merge
+        // keys on the new one. Covered by indexer.test.ts's
+        // "manifest changes mid-index (#105)".
         const prev = appMeta.get(r.appId);
         appMeta.set(r.appId, {
           appId: r.appId,
@@ -475,6 +503,9 @@ async function readAppMetadataMap(
  * between `app.json` and `NavxManifest.xml`. A URI absent from `metaByUri`
  * (its metadata read failed) is **kept**, so the main `readApp` loop's
  * existing try/catch still reports it rather than it being silently dropped.
+ * Keeping it can no longer produce a duplicate index: the Pass-2 worker retries
+ * the metadata read and re-checks twin exclusion once that retry yields an
+ * `appId` (issue #184 D3).
  */
 function excludeWorkspaceApps(
   uris: ReadonlyArray<vscode.Uri>,
