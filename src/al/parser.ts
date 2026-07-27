@@ -485,8 +485,11 @@ export function stripQuotes(s: string): string {
  * it may open a string or comment state; letting the apostrophe there open a
  * phantom string inverts every subsequent boundary in the file and silently
  * both drops real events and fabricates ones from commented-out code (#182).
- * The rule is per *line*, not per region: a `//`-commented object header
- * between `#region` and `#endregion` is still blanked like any other comment.
+ * A comment delimiter on a directive line is the one exception: a trailing
+ * `//` (or `/*`) is a genuine comment and is blanked to end-of-line like any
+ * other, so nothing inside it reaches the attribute regexes. The rule is per
+ * *line*, not per region: a `//`-commented object header between `#region` and
+ * `#endregion` is still blanked like any other comment.
  */
 export function stripComments(text: string): string {
   const out = text.split('');
@@ -500,17 +503,35 @@ export function stripComments(text: string): string {
   while (i < n) {
     const ch = text[i];
     // 1. Preprocessor directive: `#region` / `#endregion` / `#pragma`.
-    //    Directive text is free text, not code — copy it through verbatim to
-    //    end of line so nothing in it (`'`, `"`, `//`, `/*`) opens a scanner
-    //    state. Verbatim rather than blanked: `findObjects`' header regex is
-    //    anchored at `^\s*(kind)` and can't match a directive line anyway, and
-    //    copying preserves length/`\r`/`\n` for downstream offsets. Note the
-    //    surviving text is still swept by the attribute regexes, so
+    //    Directive *text* is free text, not code — copy it through verbatim to
+    //    end of line so nothing in it (`'`, `"`) opens a scanner state.
+    //    Verbatim rather than blanked: `findObjects`' header regex is anchored
+    //    at `^\s*(kind)` and can't match a directive line anyway, and copying
+    //    preserves length/`\r`/`\n` for downstream offsets.
+    //
+    //    A comment delimiter on the line is the exception. A trailing `//` on a
+    //    directive line genuinely *is* a comment and is blanked to end of line
+    //    like any other, so a line such as
+    //    `#pragma warning disable AA0005 // [IntegrationEvent(false, false)]`
+    //    cannot feed the attribute regexes and fabricate a publisher. `/*` is
+    //    blanked the same way — and, like `//`, only to the newline, so neither
+    //    opens a state that could run into the following lines: the rule stays
+    //    per line, not per region. A lone `/` is just directive text.
+    //
+    //    What #182 requires verbatim is the directive text itself (`#region
+    //    Don't break`), which stays untouched up to any comment delimiter. The
+    //    text before the delimiter is still swept by the attribute regexes, so
     //    `#region [IntegrationEvent] helpers` can still bind a phantom — that
     //    is the line-anchor bug class tracked by #179, not this one.
     if (atLineStart && ch === '#') {
+      let inComment = false;
       while (i < n && text[i] !== '\n') {
-        out[i] = text[i];
+        if (!inComment && text[i] === '/' && (text[i + 1] === '/' || text[i + 1] === '*')) {
+          inComment = true;
+        }
+        // Blank the comment, never the `\r` of a CRLF terminator: output length
+        // and every `\n`/`\r` offset must match the input exactly.
+        out[i] = inComment && text[i] !== '\r' ? ' ' : text[i];
         i++;
       }
       atLineStart = false;
