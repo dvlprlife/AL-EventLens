@@ -354,7 +354,7 @@ suite('index/folderWatcher: registerWorkspaceFolderReindex', () => {
     // includes the newly-added folder. That equivalence does NOT hold if
     // the superseding run rejects; the rebuild is then dropped and nothing
     // replaces it. See the KNOWN GAP note in `reindex.ts` — that case is
-    // tracked separately, not asserted here.
+    // tracked as issue #195, not asserted here.
     patchOnDidChange();
     const store = new EventIndexStore();
     try {

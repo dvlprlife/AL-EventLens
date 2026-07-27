@@ -167,7 +167,7 @@ export interface RunIndexOptions {
    * The converse — standing down because a newer full run exists — is
    * only sound when that newer run goes on to commit. If it rejects
    * instead, this run's discarded scan is not rebuilt by anyone. See the
-   * KNOWN GAP note at the check in `runIndexAndCommit`.
+   * KNOWN GAP note at the check in `runIndexAndCommit` (issue #195).
    *
    * Default `false`, so the primitive's last-started-wins contract is
    * unchanged for any caller that does not ask for recovery.
@@ -238,7 +238,7 @@ export function runIndexAndCommit(
     // the save path never did. Closing it needs the counter to record
     // completion, not just entry, which is a real concurrency change and
     // this file's concurrency changes have a history (#113/#119) of
-    // costing more than they fix. Tracked as its own issue rather than
+    // costing more than they fix. Tracked as issue #195 rather than
     // folded in here — do not "simplify" this comment away.
     if (options.reissueIfSuperseded === true && runSeq === latestRunSeq) {
       runIndexAndCommit(context, store, indexFn).done
