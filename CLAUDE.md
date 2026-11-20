@@ -19,7 +19,7 @@ subscribers across an AL/Business Central workspace and its dependency apps.
 
 ## Author conventions (carry from existing dvlprlife extensions)
 Before generating new code or docs, read the two reference repos:
-- `C:/Users/brad/GitHub/Markdown-Forge`
+- `C:/Users/brad/GitHub/Markdown-Foundry`
 - `C:/Users/brad/GitHub/Selection-Count`
 
 Match the patterns you find there. Specifically:
