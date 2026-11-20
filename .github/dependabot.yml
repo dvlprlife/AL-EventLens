@@ -26,13 +26,24 @@ updates:
       # so an unignored bump silently breaks every grouped dev-dep PR (it did,
       # in #170/#171). Raise this only in lockstep with engines.vscode, by hand.
       - dependency-name: "@types/vscode"
+      # typescript-eslint's peer deps pin a supported TypeScript range, and a
+      # new TypeScript major ships before typescript-eslint supports it. The
+      # TS 6 -> 7 bump failed `npm ci` with ERESOLVE on every OS leg (#204).
+      # Raise the TypeScript major by hand once typescript-eslint supports it.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
+      # Groups take minor and patch updates only. Without `update-types` a
+      # group swallows majors too, so one breaking bump fails the whole
+      # grouped PR. Majors open their own PRs, as the header describes.
       dev-dependencies:
         dependency-type: "development"
+        update-types: ["minor", "patch"]
         patterns:
           - "*"
       production-dependencies:
         dependency-type: "production"
+        update-types: ["minor", "patch"]
         patterns:
           - "*"
 
